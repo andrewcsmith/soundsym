@@ -1,0 +1,10 @@
+[package]
+name = "soundsym"
+version = "0.1.0"
+authors = ["Andrew Smith <andrewchristophersmith@gmail.com>"]
+
+[dependencies]
+voting_experts = { path = "../voting_experts" }
+vox_box = { path = "../vox_box" }
+hound = "1.1"
+cogset = "0.2"
