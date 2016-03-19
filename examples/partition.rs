@@ -11,6 +11,6 @@ use soundsym::*;
 fn main() {
     let path = Path::new("data/long_sample.wav");
     let (path, splits) = partition(path).unwrap();
-    write_splits(path, splits).unwrap();
+    write_splits(path, &splits).unwrap();
 }
 

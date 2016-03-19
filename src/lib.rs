@@ -11,6 +11,7 @@ use voting_experts::{cast_votes, split_string};
 use std::path::Path;
 use std::error::Error;
 use std::str::from_utf8;
+use std::cmp::Ordering;
 
 pub const NCOEFFS: usize = 12;
 pub const HOP: usize = 2048;
@@ -87,34 +88,91 @@ pub fn write_splits(path: &Path, splits: &Vec<usize>) -> Result<(), Box<Error>> 
     Ok(())
 }
 
+pub struct SoundDictionary {
+    sounds: Vec<Sound>
+}
+
+pub struct Sound {
+    max_power: f64,
+    samples: Vec<f64>,
+    mfccs: Vec<Euclid<[f64; NCOEFFS]>>
+}
+
+impl SoundDictionary {
+    pub fn from_path(path: &Path) -> Result<SoundDictionary, Box<Error>> {
+        let dir = try!(path.read_dir());
+        let mut out = SoundDictionary { 
+            sounds: Vec::<Sound>::with_capacity(dir.size_hint().0) 
+        };
+
+        for res in dir {
+            let entry = try!(res);
+            let mut file = try!(hound::WavReader::open(entry.path()));
+            let samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap_or(0) as f64).collect();
+            let sample_rate = file.spec().sample_rate;
+            out.sounds.push(Sound::from_samples(samples, sample_rate as f64));
+        }
+        Ok(out)
+    }
+}
+
+impl Sound {
+    pub fn from_samples(old_samples: Vec<f64>, sample_rate: f64) -> Sound {
+        let mut samples = old_samples.clone();
+        samples.preemphasis(50f64 / sample_rate);
+
+        let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
+        let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
+            let mut mfccs = [0f64; NCOEFFS];
+            let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
+            for (i, c) in m.iter().enumerate() {
+                mfccs[i] = *c;
+            }
+            Euclid(mfccs)
+        };
+
+        let power_calc = |frame: Vec<f64>| -> f64 {
+            let len = frame.len() as f64;
+            (frame.iter().fold(0., |acc, s| acc + s.powi(2)) / len).sqrt()
+        };
+
+        let mfccs = sample_windows.map(&mfcc_calc).collect();
+        let mut max_power = 0.;
+
+        {
+            let power_windows = Windower::new(WindowType::Rectangle, &old_samples[..], HOP, HOP);
+            let mut powers: Vec<f64> = power_windows.map(&power_calc).collect();
+            powers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+            max_power = powers[0];
+        }
+
+        Sound { 
+            max_power: max_power,
+            samples: old_samples,
+            mfccs: mfccs
+        }
+    }
+}
+
 #[test]
 fn test_discretize() {
     let path = Path::new("data/sample.wav");
     let mfccs = calc_mfccs(path);
     let kmeans = discretize(&mfccs[..]);
     let clusters = kmeans.clusters();
-
-    let mut file = hound::WavReader::open(path).unwrap();
-    let sample_rate = file.spec().sample_rate;
-    let samples: Vec<f32> = file.samples::<i32>().map(|s| s.unwrap() as f32).collect();
-
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: sample_rate,
-        bits_per_sample: 16
-    };
-
-    for (idx, cluster) in clusters.iter().enumerate() {
-        let mut writer = hound::WavWriter::create(format!("data/output_{}.wav", idx), spec).unwrap();
-        let mut last_sample = 0f32;
-        for index in cluster.1.iter() {
-            let offset = index * HOP;
-            for sample in &samples[offset..(offset+HOP)] {
-                writer.write_sample(((*sample + last_sample) / 2f32) as i16).unwrap();
-                last_sample = *sample as f32;
-            }
-        }
-        writer.finalize().unwrap();
-    }
 }
 
+#[test]
+fn test_sound_from_samples() {
+    let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
+    let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
+    let sample_rate = file.spec().sample_rate;
+    let sound = Sound::from_samples(samples.clone(), sample_rate as f64);
+    samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
+    println!("max i32: {}", i16::max_value());
+    // println!("max val: {}", max_val);
+    println!("max_power: {}", sound.max_power);
+    println!("max sample: {}", samples[0]);
+    assert!((samples[0] - 0.5961925502).abs() < 1e-9);
+    assert!((sound.max_power - 0.19170839520179).abs() < 1e-12);
+}
