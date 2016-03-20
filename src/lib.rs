@@ -2,16 +2,19 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate cogset;
+extern crate blas;
 
 use vox_box::spectrum::MFCC;
 use vox_box::waves::{WindowType, Windower, Filter};
 use cogset::{Euclid, Kmeans, KmeansBuilder};
 use voting_experts::{cast_votes, split_string};
+use blas::c::*;
 
 use std::path::Path;
 use std::error::Error;
+use std::fmt;
 use std::str::from_utf8;
-use std::cmp::Ordering;
+use std::cmp::{Eq, Ordering, PartialOrd};
 
 pub const NCOEFFS: usize = 12;
 pub const HOP: usize = 2048;
@@ -88,40 +91,70 @@ pub fn write_splits(path: &Path, splits: &Vec<usize>) -> Result<(), Box<Error>> 
     Ok(())
 }
 
-pub struct SoundDictionary {
-    sounds: Vec<Sound>
-}
-
-pub struct Sound {
-    max_power: f64,
-    samples: Vec<f64>,
-    mfccs: Vec<Euclid<[f64; NCOEFFS]>>
-}
+pub struct SoundDictionary(Vec<Sound>);
 
 impl SoundDictionary {
     pub fn from_path(path: &Path) -> Result<SoundDictionary, Box<Error>> {
         let dir = try!(path.read_dir());
-        let mut out = SoundDictionary { 
-            sounds: Vec::<Sound>::with_capacity(dir.size_hint().0) 
-        };
+        let mut out = SoundDictionary(Vec::<Sound>::with_capacity(dir.size_hint().0)); 
 
         for res in dir {
             let entry = try!(res);
+            match entry.path().extension() {
+                Some(ext) => { if ext != "wav" { continue } },
+                None => { continue }
+            }
+
             let mut file = try!(hound::WavReader::open(entry.path()));
             let samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap_or(0) as f64).collect();
             let sample_rate = file.spec().sample_rate;
-            out.sounds.push(Sound::from_samples(samples, sample_rate as f64));
+            let tag = entry.path().file_stem()
+                .map(|s| s.to_os_string())
+                .and_then(|s| s.into_string().ok());
+            out.0.push(Sound::from_samples(samples, sample_rate as f64, tag));
         }
         Ok(out)
+    }
+
+    pub fn match_sound<'a>(&'a mut self, other: &Sound) -> Result<&'a Sound, Box<Error>> {
+        let cosine_sim_func = |me: &Sound, you: &Sound| -> f64 {
+            let len = [me.mfccs.len(), you.mfccs.len()].iter().min().unwrap().clone();
+            let dot = ddot(len as i32, &me.mfccs[..], 1, &you.mfccs[..], 1);
+            let me_nrm2 = dnrm2(len as i32, &me.mfccs[..], 1);
+            let you_nrm2 = dnrm2(len as i32, &you.mfccs[..], 1);
+            dot / (me_nrm2 * you_nrm2)
+        };
+
+        self.0.sort_by(|a, b| {
+            let a_score = cosine_sim_func(a, &other);
+            let b_score = cosine_sim_func(b, &other);
+            a_score.partial_cmp(&b_score).unwrap_or(Ordering::Equal)
+        });
+
+        Ok(&self.0[0])
+    }
+}
+
+pub struct Sound {
+    max_power: f64,
+    name: Option<String>,
+    samples: Vec<f64>,
+    mfccs: Vec<f64>
+}
+
+impl fmt::Display for Sound {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", &self.name.clone().unwrap_or("n/a".to_string()))
     }
 }
 
 impl Sound {
-    pub fn from_samples(old_samples: Vec<f64>, sample_rate: f64) -> Sound {
+    pub fn from_samples(old_samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
         let mut samples = old_samples.clone();
         samples.preemphasis(50f64 / sample_rate);
 
         let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
+
         let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
             let mut mfccs = [0f64; NCOEFFS];
             let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
@@ -136,7 +169,13 @@ impl Sound {
             (frame.iter().fold(0., |acc, s| acc + s.powi(2)) / len).sqrt()
         };
 
-        let mfccs = sample_windows.map(&mfcc_calc).collect();
+        // A single vector of mfccs
+        let mfccs = sample_windows.map(&mfcc_calc)
+            .fold(Vec::<f64>::with_capacity(samples.len() * NCOEFFS / HOP), |mut acc, v| {
+                acc.extend_from_slice(&v.0[..]);
+                acc
+            });
+
         let mut max_power = 0.;
 
         {
@@ -148,9 +187,22 @@ impl Sound {
 
         Sound { 
             max_power: max_power,
+            name: name,
             samples: old_samples,
             mfccs: mfccs
         }
+    }
+
+    pub fn from_path(path: &Path) -> Result<Sound, Box<Error>> {
+        let mut file = try!(hound::WavReader::open(&path));
+        let bits_down: u32 = 32 - file.spec().bits_per_sample as u32;
+        let mut samples: Vec<f64> = file.samples::<i32>()
+            .map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(bits_down) as f64).collect();
+        let sample_rate = file.spec().sample_rate;
+        let tag = path.file_stem()
+            .map(|s| s.to_os_string())
+            .and_then(|s| s.into_string().ok());
+        Ok(Sound::from_samples(samples.clone(), sample_rate as f64, tag))
     }
 }
 
@@ -167,7 +219,7 @@ fn test_sound_from_samples() {
     let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
     let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
     let sample_rate = file.spec().sample_rate;
-    let sound = Sound::from_samples(samples.clone(), sample_rate as f64);
+    let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None);
     samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
     println!("max i32: {}", i16::max_value());
     // println!("max val: {}", max_val);
