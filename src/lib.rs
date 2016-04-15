@@ -14,16 +14,17 @@ use std::path::Path;
 use std::error::Error;
 use std::fmt;
 use std::str::from_utf8;
-use std::cmp::{Eq, Ordering, PartialOrd};
+use std::cmp::{Ordering, PartialOrd};
 
-pub const NCOEFFS: usize = 12;
+pub const NCOEFFS: usize = 16;
 pub const HOP: usize = 2048;
+pub const PREEMPHASIS: f64 = 50f64;
 
 pub fn calc_mfccs(path: &Path) -> Vec<Euclid<[f64; NCOEFFS]>> {
     let mut file = hound::WavReader::open(path).unwrap();
     let sample_rate = file.spec().sample_rate;
     let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64).collect();
-    samples.preemphasis(50f64 / sample_rate as f64);
+    samples.preemphasis(PREEMPHASIS / sample_rate as f64);
 
     let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
     let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
@@ -43,32 +44,59 @@ pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
     KmeansBuilder::new().tolerance(tol).kmeans(data, k)
 }
 
-pub fn partition<'a>(path: &'a Path) -> Result<(&'a Path, Vec<usize>), Box<Error>> {
-    let mfccs = calc_mfccs(path);
-    let clusters = discretize(&mfccs[..]).clusters();
+pub struct Partitioner<'a> {
+    path: &'a Path,
+    depth: usize,
+    threshold: usize
+}
 
-    // Symbol to start the gibberish from
-    let start_symbol = "A".as_bytes()[0];
-    // Initialize memory for a u8 vector with one element per mfcc frame
-    let mut byte_string = vec![0u8; mfccs.len()];
-    // Look up the frame of each element in each cluster, and assign to it that cluster's label.
-    for (idx, cluster) in clusters.iter().enumerate() {
-        let value = idx as u8 + start_symbol;
-        for &index in cluster.1.iter() {
-            byte_string[index] = value as u8;
+impl<'a> Partitioner<'a> {
+    pub fn new(path: &'a Path) -> Self {
+        Partitioner {
+            path: path,
+            depth: 5,
+            threshold: 4
         }
     }
 
-    let text_string = try!(from_utf8(&byte_string[..]));
-    let votes = cast_votes(&text_string, 4);
-    let splits = split_string(&text_string, &votes, 4, 3);
-    let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
-    Ok((path, segment_lengths))
+    pub fn depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    pub fn threshold(mut self, threshold: usize) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    pub fn partition(&self) -> Result<(&'a Path, Vec<usize>), Box<Error>> {
+        let mfccs = calc_mfccs(self.path);
+        let clusters = discretize(&mfccs[..]).clusters();
+
+        // Symbol to start the gibberish from
+        let start_symbol = 'A' as u8;
+        // Initialize memory for a u8 vector with one element per mfcc frame
+        let mut byte_string = vec![0u8; mfccs.len()];
+        // Look up the frame of each element in each cluster, and assign to it that cluster's label.
+        for (idx, cluster) in clusters.iter().enumerate() {
+            let value = idx as u8 + start_symbol;
+            for &index in cluster.1.iter() {
+                byte_string[index] = value as u8;
+            }
+        }
+
+        let text_string = try!(from_utf8(&byte_string[..]));
+        let votes = cast_votes(&text_string, self.depth);
+        let splits = split_string(&text_string, &votes, self.depth, self.threshold);
+        let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
+        Ok((&self.path, segment_lengths))
+    }
 }
+
 
 /// Takes the path of a source file, and a series of sample lengths, and splits the file
 /// accordingly into a bunch of short files
-pub fn write_splits(path: &Path, splits: &Vec<usize>) -> Result<(), Box<Error>> {
+pub fn write_splits(path: &Path, splits: &Vec<usize>, out_path: &Path) -> Result<(), Box<Error>> {
     let mut file = try!(hound::WavReader::open(path));
     let sample_rate = file.spec().sample_rate;
     let mut samples = file.samples::<i32>().map(|s| s.unwrap());
@@ -81,7 +109,8 @@ pub fn write_splits(path: &Path, splits: &Vec<usize>) -> Result<(), Box<Error>> 
 
     // Works through the samples in order, writing files to disk
     for (idx, split) in splits.iter().enumerate() {
-        let mut writer = try!(hound::WavWriter::create(format!("data/output/{:02}_{}.wav", idx, split), spec));
+        let mut writer = try!(hound::WavWriter::create(
+            format!("{}/{:05}_{}.wav", out_path.to_str().unwrap(), idx, split), spec));
         for sample in samples.by_ref().take(*split) {
             try!(writer.write_sample(sample));
         }
@@ -105,18 +134,13 @@ impl SoundDictionary {
                 None => { continue }
             }
 
-            let mut file = try!(hound::WavReader::open(entry.path()));
-            let samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap_or(0) as f64).collect();
-            let sample_rate = file.spec().sample_rate;
-            let tag = entry.path().file_stem()
-                .map(|s| s.to_os_string())
-                .and_then(|s| s.into_string().ok());
-            out.0.push(Sound::from_samples(samples, sample_rate as f64, tag));
+            out.0.push(try!(Sound::from_path(&entry.path())));
         }
         Ok(out)
     }
 
     pub fn match_sound<'a>(&'a mut self, other: &Sound) -> Result<&'a Sound, Box<Error>> {
+        // Technically, in order to find the most similar sound, we do not need the you_nrm2
         let cosine_sim_func = |me: &Sound, you: &Sound| -> f64 {
             let len = [me.mfccs.len(), you.mfccs.len()].iter().min().unwrap().clone();
             let dot = ddot(len as i32, &me.mfccs[..], 1, &you.mfccs[..], 1);
@@ -136,22 +160,22 @@ impl SoundDictionary {
 }
 
 pub struct Sound {
+    pub name: Option<String>,
     max_power: f64,
-    name: Option<String>,
     samples: Vec<f64>,
     mfccs: Vec<f64>
 }
 
 impl fmt::Display for Sound {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", &self.name.clone().unwrap_or("n/a".to_string()))
+        write!(f, "{}, {}, {}", &self.name.clone().unwrap_or("n/a".to_string()), &self.max_power, &self.samples.len())
     }
 }
 
 impl Sound {
     pub fn from_samples(old_samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
         let mut samples = old_samples.clone();
-        samples.preemphasis(50f64 / sample_rate);
+        samples.preemphasis(PREEMPHASIS / sample_rate);
 
         let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
 
@@ -176,13 +200,13 @@ impl Sound {
                 acc
             });
 
-        let mut max_power = 0.;
+        let max_power;
 
         {
-            let power_windows = Windower::new(WindowType::Rectangle, &old_samples[..], HOP, HOP);
+            let power_windows = Windower::new(WindowType::Rectangle, &old_samples[..], 256, 512);
             let mut powers: Vec<f64> = power_windows.map(&power_calc).collect();
             powers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-            max_power = powers[0];
+            max_power = powers.first().unwrap_or(&0f64).clone();
         }
 
         Sound { 
@@ -196,13 +220,29 @@ impl Sound {
     pub fn from_path(path: &Path) -> Result<Sound, Box<Error>> {
         let mut file = try!(hound::WavReader::open(&path));
         let bits_down: u32 = 32 - file.spec().bits_per_sample as u32;
-        let mut samples: Vec<f64> = file.samples::<i32>()
+        let samples: Vec<f64> = file.samples::<i32>()
             .map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(bits_down) as f64).collect();
         let sample_rate = file.spec().sample_rate;
         let tag = path.file_stem()
             .map(|s| s.to_os_string())
             .and_then(|s| s.into_string().ok());
         Ok(Sound::from_samples(samples.clone(), sample_rate as f64, tag))
+    }
+    
+    pub fn max_power(&self) -> f64 {
+        self.max_power
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    pub fn samples<'a>(&'a self) -> &Vec<f64> {
+        &self.samples
     }
 }
 
