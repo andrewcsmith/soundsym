@@ -20,34 +20,26 @@ pub const NCOEFFS: usize = 16;
 pub const HOP: usize = 2048;
 pub const PREEMPHASIS: f64 = 50f64;
 
-pub fn calc_mfccs(path: &Path) -> Vec<Euclid<[f64; NCOEFFS]>> {
-    let mut file = hound::WavReader::open(path).unwrap();
-    let sample_rate = file.spec().sample_rate;
-    let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64).collect();
-    samples.preemphasis(PREEMPHASIS / sample_rate as f64);
+mod sound;
 
-    let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
-    let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
-        let mut mfccs = [0f64; NCOEFFS];
-        let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
-        for (i, c) in m.iter().enumerate() {
-            mfccs[i] = *c;
-        }
-        Euclid(mfccs)
-    };
-    sample_windows.map(&mfcc_calc).collect()
-}
+pub use sound::{Sound, SoundDictionary};
 
+/// Clumps the various Euclid points using Kmeans.
 pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
     let k = 50;
     let tol = 1e-10;
     KmeansBuilder::new().tolerance(tol).kmeans(data, k)
 }
 
+/// Partitions a sound file (from a path) into individual phonemes. It is possible to set the
+/// depth of the trie and the threshold of votes needed to draw a boundary line. 
+///
+/// Uses the voting experts algorithm on a vector of discretized MFCC vectors. Currently tuned for
+/// English language phonemes, but alternative settings could adapt for other languages or sources.
 pub struct Partitioner<'a> {
-    path: &'a Path,
-    depth: usize,
-    threshold: usize
+    pub path: &'a Path,
+    pub depth: usize,
+    pub threshold: usize
 }
 
 impl<'a> Partitioner<'a> {
@@ -59,18 +51,24 @@ impl<'a> Partitioner<'a> {
         }
     }
 
+    /// Builder method to set the depth of the trie.
     pub fn depth(mut self, depth: usize) -> Self {
         self.depth = depth;
         self
     }
 
+    /// Builder method to set the minimum number of votes required to execute a split.
     pub fn threshold(mut self, threshold: usize) -> Self {
         self.threshold = threshold;
         self
     }
 
+    /// Executes the partition. On success, returns a tuple containing the path of the file
+    /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
+    /// the phoneme.
     pub fn partition(&self) -> Result<(&'a Path, Vec<usize>), Box<Error>> {
-        let mfccs = calc_mfccs(self.path);
+        let sound = try!(Sound::from_path(self.path));
+        let mfccs = sound.euclid_mfccs();
         let clusters = discretize(&mfccs[..]).clusters();
 
         // Symbol to start the gibberish from
@@ -92,7 +90,6 @@ impl<'a> Partitioner<'a> {
         Ok((&self.path, segment_lengths))
     }
 }
-
 
 /// Takes the path of a source file, and a series of sample lengths, and splits the file
 /// accordingly into a bunch of short files
@@ -120,137 +117,43 @@ pub fn write_splits(path: &Path, splits: &Vec<usize>, out_path: &Path) -> Result
     Ok(())
 }
 
-pub struct SoundDictionary(Vec<Sound>);
+/// Convenience Error type.
+#[derive(Debug)]
+pub struct CosError<'a>(&'a str);
 
-impl SoundDictionary {
-    pub fn from_path(path: &Path) -> Result<SoundDictionary, Box<Error>> {
-        let dir = try!(path.read_dir());
-        let mut out = SoundDictionary(Vec::<Sound>::with_capacity(dir.size_hint().0)); 
-
-        for res in dir {
-            let entry = try!(res);
-            match entry.path().extension() {
-                Some(ext) => { if ext != "wav" { continue } },
-                None => { continue }
-            }
-
-            out.0.push(try!(Sound::from_path(&entry.path())));
-        }
-        Ok(out)
+impl<'a> Error for CosError<'a> {
+    fn description(&self) -> &str {
+        self.0
     }
 
-    pub fn match_sound<'a>(&'a mut self, other: &Sound) -> Result<&'a Sound, Box<Error>> {
-        // Technically, in order to find the most similar sound, we do not need the you_nrm2
-        let cosine_sim_func = |me: &Sound, you: &Sound| -> f64 {
-            let len = [me.mfccs.len(), you.mfccs.len()].iter().min().unwrap().clone();
-            let dot = ddot(len as i32, &me.mfccs[..], 1, &you.mfccs[..], 1);
-            let me_nrm2 = dnrm2(len as i32, &me.mfccs[..], 1);
-            let you_nrm2 = dnrm2(len as i32, &you.mfccs[..], 1);
-            dot / (me_nrm2 * you_nrm2)
-        };
-
-        self.0.sort_by(|a, b| {
-            let a_score = cosine_sim_func(a, &other);
-            let b_score = cosine_sim_func(b, &other);
-            a_score.partial_cmp(&b_score).unwrap_or(Ordering::Equal)
-        });
-
-        Ok(&self.0[0])
+    fn cause(&self) -> Option<&Error> {
+        None
     }
 }
 
-pub struct Sound {
-    pub name: Option<String>,
-    max_power: f64,
-    samples: Vec<f64>,
-    mfccs: Vec<f64>
-}
-
-impl fmt::Display for Sound {
+impl<'a> fmt::Display for CosError<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}, {}, {}", &self.name.clone().unwrap_or("n/a".to_string()), &self.max_power, &self.samples.len())
+        write!(f, "{}", self.0)
     }
 }
 
-impl Sound {
-    pub fn from_samples(old_samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
-        let mut samples = old_samples.clone();
-        samples.preemphasis(PREEMPHASIS / sample_rate);
+/// Super-hack type containing f64 to be used in Ord
+#[derive(PartialEq, PartialOrd)]
+pub struct OrdF64(pub f64);
 
-        let sample_windows = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP);
+impl std::cmp::Eq for OrdF64 {}
 
-        let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
-            let mut mfccs = [0f64; NCOEFFS];
-            let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
-            for (i, c) in m.iter().enumerate() {
-                mfccs[i] = *c;
-            }
-            Euclid(mfccs)
-        };
-
-        let power_calc = |frame: Vec<f64>| -> f64 {
-            let len = frame.len() as f64;
-            (frame.iter().fold(0., |acc, s| acc + s.powi(2)) / len).sqrt()
-        };
-
-        // A single vector of mfccs
-        let mfccs = sample_windows.map(&mfcc_calc)
-            .fold(Vec::<f64>::with_capacity(samples.len() * NCOEFFS / HOP), |mut acc, v| {
-                acc.extend_from_slice(&v.0[..]);
-                acc
-            });
-
-        let max_power;
-
-        {
-            let power_windows = Windower::new(WindowType::Rectangle, &old_samples[..], 256, 512);
-            let mut powers: Vec<f64> = power_windows.map(&power_calc).collect();
-            powers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-            max_power = powers.first().unwrap_or(&0f64).clone();
-        }
-
-        Sound { 
-            max_power: max_power,
-            name: name,
-            samples: old_samples,
-            mfccs: mfccs
-        }
-    }
-
-    pub fn from_path(path: &Path) -> Result<Sound, Box<Error>> {
-        let mut file = try!(hound::WavReader::open(&path));
-        let bits_down: u32 = 32 - file.spec().bits_per_sample as u32;
-        let samples: Vec<f64> = file.samples::<i32>()
-            .map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(bits_down) as f64).collect();
-        let sample_rate = file.spec().sample_rate;
-        let tag = path.file_stem()
-            .map(|s| s.to_os_string())
-            .and_then(|s| s.into_string().ok());
-        Ok(Sound::from_samples(samples.clone(), sample_rate as f64, tag))
-    }
-    
-    pub fn max_power(&self) -> f64 {
-        self.max_power
-    }
-
-    pub fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    pub fn name(&self) -> Option<String> {
-        self.name.clone()
-    }
-
-    pub fn samples<'a>(&'a self) -> &Vec<f64> {
-        &self.samples
+impl std::cmp::Ord for OrdF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
 #[test]
 fn test_discretize() {
     let path = Path::new("data/sample.wav");
-    let mfccs = calc_mfccs(path);
-    let kmeans = discretize(&mfccs[..]);
+    let sound = Sound::from_path(path).unwrap();
+    let kmeans = discretize(&sound.euclid_mfccs()[..]);
     let clusters = kmeans.clusters();
 }
 
@@ -266,5 +169,5 @@ fn test_sound_from_samples() {
     println!("max_power: {}", sound.max_power);
     println!("max sample: {}", samples[0]);
     assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-    assert!((sound.max_power - 0.19170839520179).abs() < 1e-12);
+    assert!((sound.max_power - 0.24058003456940572).abs() < 1e-12);
 }
