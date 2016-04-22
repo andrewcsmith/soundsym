@@ -26,13 +26,13 @@ fn main() {
     let out_str = matches.opt_str("o").unwrap_or_else(|| panic!("No output file specified!"));
 
     let out_path = Path::new(&out_str[..]);
-    let path = Path::new("data/we_remember.wav");
-    let (path, splits) = Partitioner::new(&path)
+    let path = Path::new("data/we_remember_mono.wav");
+    let partitioner = Partitioner::from_path(&path).unwrap()
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")
-               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4))
-        .partition().unwrap();
-    write_splits(path, &splits, &out_path).unwrap();
+               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
+    let splits = partitioner.partition().unwrap();
+    write_splits(&partitioner.sound, &splits[..], &out_path).unwrap();
 }
 

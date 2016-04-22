@@ -13,12 +13,14 @@ use blas::c::*;
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
+use std::borrow::Cow;
 use std::str::from_utf8;
 use std::cmp::{Ordering, PartialOrd};
+use std::i32;
 
 pub const NCOEFFS: usize = 16;
 pub const HOP: usize = 2048;
-pub const PREEMPHASIS: f64 = 50f64;
+pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
 
@@ -27,7 +29,7 @@ pub use sound::{Sound, SoundDictionary};
 /// Clumps the various Euclid points using Kmeans.
 pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
     let k = 50;
-    let tol = 1e-10;
+    let tol = 1e-12;
     KmeansBuilder::new().tolerance(tol).kmeans(data, k)
 }
 
@@ -37,18 +39,23 @@ pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
 /// Uses the voting experts algorithm on a vector of discretized MFCC vectors. Currently tuned for
 /// English language phonemes, but alternative settings could adapt for other languages or sources.
 pub struct Partitioner<'a> {
-    pub path: &'a Path,
+    pub sound: Cow<'a, Sound>,
     pub depth: usize,
     pub threshold: usize
 }
 
 impl<'a> Partitioner<'a> {
-    pub fn new(path: &'a Path) -> Self {
+    pub fn new(sound: Cow<'a, Sound>) -> Self {
         Partitioner {
-            path: path,
+            sound: sound,
             depth: 5,
             threshold: 4
         }
+    }
+
+    pub fn from_path(path: &'a Path) -> Result<Self, Box<Error>> {
+        let sound = try!(Sound::from_path(path));
+        Ok(Partitioner::new(Cow::Owned(sound)))
     }
 
     /// Builder method to set the depth of the trie.
@@ -66,9 +73,8 @@ impl<'a> Partitioner<'a> {
     /// Executes the partition. On success, returns a tuple containing the path of the file
     /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
     /// the phoneme.
-    pub fn partition(&self) -> Result<(&'a Path, Vec<usize>), Box<Error>> {
-        let sound = try!(Sound::from_path(self.path));
-        let mfccs = sound.euclid_mfccs();
+    pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
+        let mfccs = self.sound.euclid_mfccs();
         let clusters = discretize(&mfccs[..]).clusters();
 
         // Symbol to start the gibberish from
@@ -87,29 +93,29 @@ impl<'a> Partitioner<'a> {
         let votes = cast_votes(&text_string, self.depth);
         let splits = split_string(&text_string, &votes, self.depth, self.threshold);
         let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
-        Ok((&self.path, segment_lengths))
+        Ok(segment_lengths)
     }
 }
 
 /// Takes the path of a source file, and a series of sample lengths, and splits the file
 /// accordingly into a bunch of short files
-pub fn write_splits(path: &Path, splits: &Vec<usize>, out_path: &Path) -> Result<(), Box<Error>> {
-    let mut file = try!(hound::WavReader::open(path));
-    let sample_rate = file.spec().sample_rate;
-    let mut samples = file.samples::<i32>().map(|s| s.unwrap());
+pub fn write_splits(sound: &Sound, splits: &[usize], out_path: &Path) -> Result<(), Box<Error>> {
+    let sample_rate = sound.sample_rate() as u32;
+    let mut samples = sound.samples().iter();
 
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: sample_rate,
-        bits_per_sample: 24
+        bits_per_sample: 32
     };
 
     // Works through the samples in order, writing files to disk
     for (idx, split) in splits.iter().enumerate() {
+        let amplitude = i32::MAX as f64;
         let mut writer = try!(hound::WavWriter::create(
             format!("{}/{:05}_{}.wav", out_path.to_str().unwrap(), idx, split), spec));
         for sample in samples.by_ref().take(*split) {
-            try!(writer.write_sample(sample));
+            try!(writer.write_sample((sample * amplitude) as i32));
         }
         try!(writer.finalize());
     }
@@ -119,7 +125,7 @@ pub fn write_splits(path: &Path, splits: &Vec<usize>, out_path: &Path) -> Result
 
 /// Convenience Error type.
 #[derive(Debug)]
-pub struct CosError<'a>(&'a str);
+pub struct CosError<'a>(pub &'a str);
 
 impl<'a> Error for CosError<'a> {
     fn description(&self) -> &str {
@@ -166,8 +172,8 @@ fn test_sound_from_samples() {
     samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
     println!("max i32: {}", i16::max_value());
     // println!("max val: {}", max_val);
-    println!("max_power: {}", sound.max_power);
+    println!("max_power: {}", sound.max_power());
     println!("max sample: {}", samples[0]);
     assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-    assert!((sound.max_power - 0.24058003456940572).abs() < 1e-12);
+    assert!((sound.max_power() - 0.24058003456940572).abs() < 1e-12);
 }

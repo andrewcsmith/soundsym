@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<Error>> {
             }
             // println!("{}, r, , ", &phoneme);
         } else {
-            let sound = try!(dictionary.match_sound(&phoneme));
+            let sound = try!(dictionary.match_sound(&phoneme).ok_or(CosError("Problem matching sound.")));
             let samples: &Vec<f64> = sound.samples();
             for sample in samples.iter().chain(iter::repeat(&0f64)).take(phoneme.len()) {
                 try!(writer.write_sample((sample * i16::max_value() as f64 * 4f64.powf(phoneme.max_power())) as i16));
