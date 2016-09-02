@@ -1,0 +1,12 @@
+[package]
+name = "reconstruction"
+version = "0.1.0"
+authors = ["Andrew Smith <andrewchristophersmith@gmail.com>"]
+
+[dependencies]
+soundsym = { path = "../../" }
+vox_box = { path = "../../../vox_box" }
+portaudio = "0.7.0"
+hound = "2.0"
+bounded-spsc-queue = "0.1.2"
+crossbeam = "0.2"
