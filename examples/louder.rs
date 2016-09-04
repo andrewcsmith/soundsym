@@ -23,7 +23,7 @@ fn main() {
     };
 
     let path = Path::new("data/we_remember_mono.wav");
-    let (path, splits) = Partitioner::new(&path)
+    let splits = Partitioner::from_path(&path).unwrap()
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")

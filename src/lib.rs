@@ -3,19 +3,17 @@ extern crate vox_box;
 extern crate hound;
 extern crate cogset;
 extern crate blas;
+extern crate sample;
 
-use vox_box::spectrum::MFCC;
-use vox_box::waves::{WindowType, Windower, Filter};
 use cogset::{Euclid, Kmeans, KmeansBuilder};
 use voting_experts::{cast_votes, split_string};
-use blas::c::*;
 
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
 use std::borrow::Cow;
 use std::str::from_utf8;
-use std::cmp::{Ordering, PartialOrd};
+use std::cmp::PartialOrd;
 use std::i32;
 
 pub const NCOEFFS: usize = 16;
@@ -24,11 +22,11 @@ pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
 
-pub use sound::{Sound, SoundDictionary};
+pub use sound::{Sound, SoundDictionary, SoundSequence};
 
 /// Clumps the various Euclid points using Kmeans.
 pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
-    let k = 50;
+    let k = 40;
     let tol = 1e-12;
     KmeansBuilder::new().tolerance(tol).kmeans(data, k)
 }
@@ -97,8 +95,8 @@ impl<'a> Partitioner<'a> {
     }
 }
 
-/// Takes the path of a source file, and a series of sample lengths, and splits the file
-/// accordingly into a bunch of short files
+/// Takes a `Sound`, and a series of sample lengths, and splits the file accordingly into a bunch
+/// of short files, writing these splits to the disk.
 pub fn write_splits(sound: &Sound, splits: &[usize], out_path: &Path) -> Result<(), Box<Error>> {
     let sample_rate = sound.sample_rate() as u32;
     let mut samples = sound.samples().iter();
@@ -151,7 +149,7 @@ impl std::cmp::Eq for OrdF64 {}
 
 impl std::cmp::Ord for OrdF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.partial_cmp(other).unwrap()
     }
 }
 

@@ -1,16 +1,24 @@
+extern crate time;
 extern crate hound;
+extern crate num;
+extern crate sample;
 
-use vox_box::spectrum::MFCC;
-use vox_box::waves::{WindowType, Windower, Filter};
-use cogset::{Euclid, Kmeans, KmeansBuilder};
-use voting_experts::{cast_votes, split_string};
+use sample::{window, ToSampleSlice, FromSampleSlice};
+
+use vox_box;
+use vox_box::waves::Filter;
+use vox_box::spectrum::{Resonance, MFCC};
+
+use cogset::{Euclid};
 use blas::c::*;
+use self::num::complex::Complex;
 
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
-use std::cmp::{Ordering, PartialOrd};
 use std::{f64, i32};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 
@@ -31,6 +39,7 @@ pub fn cosine_sim(me: &[f64], you: &[f64]) -> f64 {
 /// Similar to the above, but does not calculate the norm of `you`. Suitable for comparing/ranking
 /// elements that have the same "you" value.
 #[inline]
+#[allow(unused)]
 pub fn cosine_sim_const_you(me: &[f64], you: &[f64]) -> Result<f64, CosError<'static>> {
     if me.len() != you.len() {
         return Err(CosError("Vectors for cosine_sim must be same length"))
@@ -46,9 +55,14 @@ pub fn cosine_sim_const_you(me: &[f64], you: &[f64]) -> Result<f64, CosError<'st
 
 /// Angular cosine similarity. This bounds the result to `[0, 1]` while maintaining ordering. It is
 /// also a proper metric.
+#[inline]
 pub fn cosine_sim_angular(me: &[f64], you: &[f64]) -> f64 {
-    let cos_sim = cosine_sim(me, you);
-    1. - (cos_sim.acos() / f64::consts::PI)
+    let sim: f64 = match cosine_sim(me, you) {
+        x if x > 1.0 => 1.0,
+        x if x < -1.0 => 1.0,
+        x => x
+    };
+    sim.acos() * f64::consts::FRAC_1_PI
 }
 
 /// Struct holding sample information about a Sound and some pre-calculated data.
@@ -60,7 +74,8 @@ pub struct Sound {
     samples: Vec<f64>,
     sample_rate: f64,
     mfccs: Vec<f64>,
-    mean_mfccs: Euclid<[f64; NCOEFFS]>
+    mean_mfccs: Euclid<[f64; NCOEFFS]>,
+    formants: Option<[f64; 3]>
 }
 
 impl fmt::Display for Sound {
@@ -72,7 +87,7 @@ impl fmt::Display for Sound {
 impl Sound {
     /// Generate a Sound from a Vec of f64 samples. Calculates max_power and mfccs.
     pub fn from_samples(samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
-        let mfcc_calc = |frame: Vec<f64>| -> Euclid<[f64; NCOEFFS]> { 
+        let mfcc_calc = |frame: &[f64]| -> Euclid<[f64; NCOEFFS]> { 
             let mut mfccs = [0f64; NCOEFFS];
             let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
             for (i, c) in m.iter().enumerate() {
@@ -81,36 +96,66 @@ impl Sound {
             Euclid(mfccs)
         };
 
-        let power_calc = |frame: Vec<f64>| -> f64 {
-            let len = frame.len() as f64;
-            (frame.iter().fold(0., |acc, s| acc + s.powi(2)) / len).sqrt()
-        };
+        let mut frame_buffer: Vec<f64> = Vec::with_capacity(HOP);
 
         // A single vector of mfccs
-        let mfccs = Windower::new(WindowType::Hanning, &samples[..], HOP, HOP)
-            .map(&mfcc_calc)
+        let mfccs: Vec<f64> = window::Windower::hanning(
+            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), HOP, HOP)
+            .map(|frame| {
+                for s in frame {
+                    frame_buffer.extend_from_slice(<&[f64]>::to_sample_slice(&s[..]));
+                }
+                let mfccs = mfcc_calc(&frame_buffer[..]);
+                frame_buffer.clear();
+                mfccs
+            })
             .fold(Vec::<f64>::with_capacity(samples.len() * NCOEFFS / HOP), |mut acc, v| {
                 acc.extend_from_slice(&v.0[..]);
                 acc
             });
 
-        let max_power = {
-            let power_windows = Windower::new(WindowType::Rectangle, &samples[..], 256, 512);
-            let mut powers: Vec<f64> = power_windows.map(&power_calc).collect();
-            powers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-            powers.first().unwrap_or(&0f64).clone()
+        let max_power: f64 = window::Windower::rectangle(
+            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), 256, 512)
+            .map(|frame| {
+                let mut count: usize = 0;
+                (frame.fold(0., |acc, s| {
+                    let sample_slice: &[f64] = <&[f64]>::to_sample_slice(&s[..]);
+                    count += 1;
+                    acc + sample_slice[0].powi(2)
+                }) / count as f64).sqrt()
+            })
+            .fold(0., |acc, el| acc.max(el));
+
+        let mean_mfccs: Euclid<[f64; NCOEFFS]> = {
+            let nframes = mfccs.len() / NCOEFFS;
+            let mfcc_arrays: &[[f64; NCOEFFS]] = <&[[f64; NCOEFFS]]>::from_sample_slice(&mfccs[..]).unwrap();
+            let sums = mfcc_arrays.iter().fold([0f64; NCOEFFS], |mut acc, el| {
+                for (idx, s) in el.iter().enumerate() {
+                    acc[idx] += *s;
+                }
+                acc
+            });
+            let mean_iter = sums.iter().map(|el| el / nframes as f64);
+            let mut out = Euclid([0f64; NCOEFFS]);
+            for (idx, m) in (0..NCOEFFS).zip(mean_iter) {
+                out.0[idx] = m;
+            }
+            out
         };
 
-        let mean_mfccs = mfcc_calc(samples.clone());
-
-        Sound { 
+        let sound = Sound { 
             max_power: max_power,
             name: name,
             samples: samples,
             sample_rate: sample_rate,
             mfccs: mfccs,
-            mean_mfccs: mean_mfccs
-        }
+            mean_mfccs: mean_mfccs,
+            formants: None
+        };
+
+        // let mut work = Vec::with_capacity(sound.samples.len());
+        // sound.formants = Some(sound.mean_formants(&mut work));
+        sound
     }
 
     /// Generate a Sound by reading in a WAV file. Returns an Error if the file does not exist or
@@ -142,9 +187,75 @@ impl Sound {
         try!(file.finalize());
         Ok(())
     }
+
+    /// Calculate the mean formants of the Sound. 
+    ///
+    /// Returns values:
+    /// f1 frequency, f2 frequency, f3 frequency
+    pub fn mean_formants(&self, work: &mut Vec<f64>) -> [f64; 3] {
+        assert!(work.capacity() >= self.samples.len());
+
+        let bin_size = 512;
+        let hop_size = 128;
+
+        work.clear();
+        work.clone_from(&self.samples);
+        let samples = work;
+        samples.preemphasis(50.0 / self.sample_rate);
+
+        let window = window::Windower::hanning(
+            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), hop_size, bin_size);
+        let mut sum = [0f64; 3];
+        let mut size = 0usize;
+
+        let mut sample_buffer: Vec<f64> = Vec::with_capacity(bin_size);
+
+        let mut formants = [Resonance::new(0., 0.); 4];
+        for (idx, f) in vox_box::MALE_FORMANT_ESTIMATES.iter().enumerate() {
+            formants[idx].frequency = *f;
+        }
+
+        for frame in window {
+            for s in frame {
+                sample_buffer.extend_from_slice(&s[..].to_sample_slice());
+            }
+
+            let n_coeffs = 14;
+            let mut work = vec![0f64; vox_box::find_formants_real_work_size(
+                sample_buffer.len(), n_coeffs)];
+            let mut complex_work = vec![Complex::<f64>::new(0., 0.); vox_box::find_formants_complex_work_size(n_coeffs)];
+
+            // TODO: Need to resample the buffer in order to make this accurate
+            vox_box::find_formants(&mut sample_buffer, self.sample_rate,
+                                   n_coeffs, &mut work[..], &mut complex_work[..], 
+                                   &mut formants[..]).unwrap();
+
+            sum[0] += formants.get(0).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
+            sum[1] += formants.get(1).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
+            sum[2] += formants.get(2).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
+            size += 1;
+            sample_buffer.clear();
+        }
+
+        assert!(size > 0);
+        let scale = 1. / size as f64;
+        for v in sum.iter_mut() { *v *= scale; }
+
+        sum
+    }
     
     pub fn max_power(&self) -> f64 {
         self.max_power
+    }
+
+    pub fn pitch_confidence(&self) -> f64 {
+        match self.formants {
+            Some(f) => f[3],
+            None => {
+                let mut work = Vec::with_capacity(self.samples.len());
+                self.mean_formants(&mut work)[3]
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -189,15 +300,24 @@ impl Sound {
 /// Cache of Sounds that can be referenced using an outside sound, to find the "most similar"
 /// sound.
 pub struct SoundDictionary {
-    pub sounds: Vec<Sound>
+    pub sounds: Vec<Arc<Sound>>
 }
 
 impl SoundDictionary {
+    /// An empty SoundDictionary
+    pub fn new() -> SoundDictionary {
+        SoundDictionary {
+            sounds: Vec::new()
+        }
+    }
+
     /// Generates a SoundDictionary by walking a given path. Calculates MFCCs of all the Sounds in
     /// advance.
     pub fn from_path(path: &Path) -> Result<SoundDictionary, Box<Error>> {
         let dir = try!(path.read_dir());
-        let mut out = SoundDictionary {sounds: Vec::<Sound>::with_capacity(dir.size_hint().0) }; 
+        let mut out = SoundDictionary {
+            sounds: Vec::<Arc<Sound>>::with_capacity(dir.size_hint().0) 
+        }; 
 
         for res in dir {
             let entry = try!(res);
@@ -206,42 +326,70 @@ impl SoundDictionary {
                 None => { continue }
             }
 
-            out.sounds.push(try!(Sound::from_path(&entry.path())));
+            out.sounds.push(Arc::new(try!(Sound::from_path(&entry.path()))));
         }
         Ok(out)
     }
 
-    /// Finds the most similar Sound in the SoundDictionary to `other`. Requires that the two
-    /// Sounds have mfccs of the same length
-    pub fn match_sound(&self, other: &Sound) -> Option<&Sound> {
+    /// Builds a SoundDictionary from a source sound and a list of segment lengths
+    pub fn from_segments(sound: &Sound, segments: &[usize]) -> SoundDictionary {
+        let mut dict = SoundDictionary::new();
+        dict.add_segments(&sound, segments);
+        dict
+    }
+
+    /// Adds segments from a given Sound into the dictionary
+    pub fn add_segments(&mut self, sound: &Sound, segments: &[usize]) {
+        self.sounds.reserve(segments.len());
+        let mut samples = sound.samples().iter();
+        for seg in segments {
+            let samp = samples.by_ref().take(*seg).map(|s| *s).collect();
+            self.sounds.push(Arc::new(Sound::from_samples(samp, sound.sample_rate(), None)));
+        }
+    }
+
+    /// Finds the most similar Sound in the SoundDictionary to `other`
+    pub fn match_sound(&self, other: &Sound) -> Option<Arc<Sound>> {
         self.at_distance(0., other)
     }
 
     /// Finds the Sound closest to a particular distance away from a given Sound.
-    pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<&Sound> {
-        self.sounds.iter().min_by_key(|a| OrdF64((cosine_sim_angular(&a.mean_mfccs().0, &other.mean_mfccs().0) - distance).abs()))
+    pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<Arc<Sound>> {
+        self.sounds.iter()
+            .min_by_key(|a| OrdF64((cosine_sim_angular(&a.mean_mfccs().0, &other.mean_mfccs().0) - distance).abs()))
+            .map(|s| s.clone())
     }
 }
 
 /// Sequence of sounds and the distances between them
 #[derive(Debug)]
-pub struct SoundSequence<'a> {
-    sounds: Vec<&'a Sound>,
+pub struct SoundSequence {
+    sounds: Vec<Arc<Sound>>,
     distances: Vec<f64>
 }
 
-impl<'a> IntoIterator for SoundSequence<'a> {
-    type Item = &'a Sound;
-    type IntoIter = ::std::vec::IntoIter<&'a Sound>;
+// impl<'a> IntoIterator for SoundSequence<'a> {
+//     type Item = Arc<Sound>;
+//     type IntoIter = ::std::vec::IntoIter<Arc<Sound>>;
+//
+//     fn into_iter(self) -> Self::IntoIter {
+//         self.sounds.into_iter()
+//     }
+// }
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.sounds.into_iter()
+impl fmt::Display for SoundSequence {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        try!(write!(f, "Sounds:\n"));
+        for sound in self.sounds.iter() {
+            try!(write!(f, "{}\n", sound));
+        }
+        Ok(())
     }
 }
 
-impl<'a> SoundSequence<'a> {
+impl SoundSequence {
     /// Create a new SoundSequence from a list of Sounds.
-    pub fn new(sounds: Vec<&'a Sound>) -> SoundSequence {
+    pub fn new(sounds: Vec<Arc<Sound>>) -> SoundSequence {
         let distances = sounds.windows(2)
             .map(|pair| cosine_sim_angular(&pair[0].mean_mfccs().0, &pair[1].mean_mfccs().0))
             .collect();
@@ -254,8 +402,8 @@ impl<'a> SoundSequence<'a> {
 
     /// Given a starting sound, list of distances, and a dictionary, constructs a SoundSequence
     /// where each distance from one to the next is as close as possible to the target distances.
-    pub fn from_distances(distances: &[f64], start: &'a Sound, dict: &'a SoundDictionary) -> Result<SoundSequence<'a>, String> {
-        let mut sounds = Vec::<&Sound>::with_capacity(distances.len() + 1);
+    pub fn from_distances(distances: &[f64], start: Arc<Sound>, dict: &SoundDictionary) -> Result<SoundSequence, String> {
+        let mut sounds = Vec::<Arc<Sound>>::with_capacity(distances.len() + 1);
         sounds.push(start);
 
         for distance in distances {
@@ -269,8 +417,34 @@ impl<'a> SoundSequence<'a> {
     }
 
     /// Gets a reference to the list of sounds
-    pub fn sounds(&self) -> &Vec<&'a Sound> {
+    pub fn sounds(&self) -> &Vec<Arc<Sound>> {
         &self.sounds
+    }
+    
+    pub fn distances(&self) -> &Vec<f64> {
+        &self.distances
+    }
+
+    pub fn morph_to(&self, distances: &[f64], dict: &SoundDictionary) -> Result<SoundSequence, String> {
+        let mut sounds = Vec::<Arc<Sound>>::with_capacity(self.sounds.len());
+        for (sound, distance) in self.sounds().iter().zip(distances.iter()) {
+            match dict.at_distance(*distance, sound) {
+                Some(s) => { sounds.push(s.clone()) },
+                None => { return Err(format!("Cannot find sound at distance {}", distance)); }
+            }
+        }
+        Ok(SoundSequence::new(sounds))
+    }
+
+    pub fn clone_from_dictionary(&self, dict: &SoundDictionary) -> Result<SoundSequence, String> {
+        let mut sounds = Vec::<Arc<Sound>>::with_capacity(self.sounds.len());
+        for sound in self.sounds.iter() {
+            match dict.match_sound(sound) {
+                Some(s) => { sounds.push(s); },
+                None => { }
+            }
+        }
+        Ok(SoundSequence::new(sounds))
     }
 
     /// Concatenates all the Sounds into a single Sound
@@ -280,16 +454,17 @@ impl<'a> SoundSequence<'a> {
         for sound in self.sounds.iter() {
             samples.extend_from_slice(&sound.samples[..]);
         }
-        Sound::from_samples(samples, self.sounds[0].sample_rate, None)
+        let sample_rate = self.sounds.get(0).map(|s| s.sample_rate).unwrap_or(44100.);
+        Sound::from_samples(samples, sample_rate, None)
     }
 }
 
 #[test]
 fn test_from_distances() {
     let dict = SoundDictionary::from_path(Path::new("data/phonemes")).unwrap();
-    let start: &Sound = &dict.sounds[4];
+    let start: Arc<Sound> = dict.sounds[4].clone();
     let distances = vec![0.5, 0.4, 0.3, 0.6, 0.2];
-    let seq = SoundSequence::from_distances(&distances[..], &start, &dict).unwrap();
+    let seq = SoundSequence::from_distances(&distances[..], start, &dict).unwrap();
     for sound in seq.sounds() {
         println!("{}", sound.name.clone().unwrap_or("(no name)".to_string()));
     }
@@ -298,38 +473,32 @@ fn test_from_distances() {
 }
 
 #[test]
-fn test_discretize_phonemes() {
-    let dict = SoundDictionary::from_path(Path::new("data/phonemes")).unwrap();
-    let mfcc_vecs: Vec<Euclid<[f64; NCOEFFS]>> = dict.sounds.iter()
-        .filter_map(|s| { 
-            if s.max_power() > 0.05 {
-                Some(s.mean_mfccs().clone())
-            } else {
-                None
-            }
-        }).collect();
-    let clusters = discretize(&mfcc_vecs[..]).clusters();
-
-    for (idx, cluster) in clusters.iter().enumerate() {
-        let mut sounds = Vec::<&Sound>::new();
-        for sound_idx in cluster.1.iter() {
-            sounds.push(&dict.sounds[*sound_idx])
-        }
-        SoundSequence::new(sounds).to_sound()
-            .write_file(Path::new(&format!("tests/sound_cluster_{}.wav", idx).as_str())).unwrap();
-    }
-}
-
-#[test]
 fn test_sequence_to_sound() {
     let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
     let sounds = vec![
-        &dict.sounds[4],
-        &dict.sounds[8],
-        &dict.sounds[12]
+        dict.sounds[4].clone(),
+        dict.sounds[8].clone(),
+        dict.sounds[12].clone()
     ];
     let seq = SoundSequence::new(sounds);
     let concat = seq.to_sound();
     concat.write_file(Path::new("tests/test_sequence_to_sound.wav")).unwrap();
+}
+
+#[test]
+fn test_sound_should_match_itself() {
+    let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
+    let sound = &dict.sounds[4];
+    println!("{:?}", sound.mean_mfccs().0);
+    println!("{:?}", cosine_sim(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
+    println!("{:?}", cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
+    assert_eq!(cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0), 0.0);
+    assert_eq!(sound.samples(), dict.match_sound(sound).unwrap().samples());
+}
+
+#[test]
+fn test_angular_distance() {
+    let mfccs = [0.1, 0.4, 0.2, 0.8];
+    assert_eq!(cosine_sim_angular(&mfccs[..], &mfccs[..]), 0.0);
 }
 

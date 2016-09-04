@@ -53,7 +53,7 @@ fn run() -> Result<(), Box<Error>> {
 
     let callback = move |DuplexStreamCallbackArgs { in_buffer, out_buffer, frames, .. }| {
         let in_buffer: &[f32; BLOCK_SIZE] = unsafe { transmute(in_buffer.as_ptr()) };
-        match recorded_sound.try_push((*in_buffer)) {
+        match recorded_sound.try_push(*in_buffer) {
             Some(_) => { println!("warning: sound buffer is full"); }
             None => { }
         }
