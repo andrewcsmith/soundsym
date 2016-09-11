@@ -22,11 +22,11 @@ pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
 
-pub use sound::{Sound, SoundDictionary, SoundSequence};
+pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_labels_to_timestamps};
 
 /// Clumps the various Euclid points using Kmeans.
 pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
-    let k = 40;
+    let k = 50;
     let tol = 1e-12;
     KmeansBuilder::new().tolerance(tol).kmeans(data, k)
 }
@@ -153,25 +153,34 @@ impl std::cmp::Ord for OrdF64 {
     }
 }
 
-#[test]
-fn test_discretize() {
-    let path = Path::new("data/sample.wav");
-    let sound = Sound::from_path(path).unwrap();
-    let kmeans = discretize(&sound.euclid_mfccs()[..]);
-    let clusters = kmeans.clusters();
-}
+#[cfg(test)]
+mod tests {
+    extern crate hound;
 
-#[test]
-fn test_sound_from_samples() {
-    let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
-    let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
-    let sample_rate = file.spec().sample_rate;
-    let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None);
-    samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
-    println!("max i32: {}", i16::max_value());
-    // println!("max val: {}", max_val);
-    println!("max_power: {}", sound.max_power());
-    println!("max sample: {}", samples[0]);
-    assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-    assert!((sound.max_power() - 0.24058003456940572).abs() < 1e-12);
+    use super::*;
+    use std::path::Path;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn test_discretize() {
+        let path = Path::new("data/sample.wav");
+        let sound = Sound::from_path(path).unwrap();
+        let kmeans = discretize(&sound.euclid_mfccs()[..]);
+        let clusters = kmeans.clusters();
+    }
+
+    #[test]
+    fn test_sound_from_samples() {
+        let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
+        let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
+        let sample_rate = file.spec().sample_rate;
+        let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None);
+        samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
+        println!("max i32: {}", i16::max_value());
+        // println!("max val: {}", max_val);
+        println!("max_power: {}", sound.max_power());
+        println!("max sample: {}", samples[0]);
+        assert!((samples[0] - 0.5961925502).abs() < 1e-9);
+        assert!((sound.max_power() - 0.2394398137328704).abs() < 1e-12);
+    }
 }

@@ -30,32 +30,30 @@ enum DictionaryHandlerEvent {
 fn run() -> Result<(), Box<Error>> {
     let pa = try!(PortAudio::new());
     let mut settings: DuplexStreamSettings<f32, f32> = try!(pa.default_duplex_stream_settings(1, 1, 44100., BLOCK_SIZE as u32));
-    settings.out_params = StreamParameters::new(DeviceIndex(3), 1, true, 0.);
+    
+    // settings.out_params = StreamParameters::new(DeviceIndex(3), 1, true, 0.);
 
     let (recorded_sound, recorded_sound_recv) = bounded_spsc_queue::make::<[f32; BLOCK_SIZE]>(65536);
     let mut frames_elapsed: usize = 0;
 
-    let target = Sound::from_path(Path::new("./we_remember_mono.wav")).unwrap();
-    let nsamples = target.samples().len();
-    let mut target_samples_iter = target.samples().iter();
-    let splits = Partitioner::new(Cow::Borrowed(&target)).partition().unwrap();
-
-    let sound_vec: Vec<Arc<Sound>> = splits.iter().map(|nsamples| {
-        Arc::new(Sound::from_samples(target_samples_iter.by_ref().take(*nsamples).cloned().collect(), 44100., None))
-    }).collect();
-
-    let target_sequence = Arc::new(SoundSequence::new(sound_vec));
-    let (sound_to_play, sound_to_play_recv) = bounded_spsc_queue::make::<f64>(nsamples * 2);
+    let target = Arc::new(Sound::from_path(Path::new("./Section_7_1.wav")).unwrap());
+    let timestamps: Vec<Timestamp> = audacity_labels_to_timestamps(Path::new("./vowel.txt")).unwrap();
+    let target_sequence = Arc::new(SoundSequence::from_timestamps(target.clone(), &timestamps[..]).unwrap());
+    let (sound_to_play, sound_to_play_recv) = bounded_spsc_queue::make::<f64>(target.samples().len() * 2);
     let (should_calculate_dictionary, should_calculate_dictionary_recv) = bounded_spsc_queue::make::<DictionaryHandlerEvent>(256);
 
     println!("nsegments: {}", target_sequence.sounds().len());
     dictionary_handler(recorded_sound_recv, target_sequence.clone(), sound_to_play, should_calculate_dictionary_recv);
 
     let callback = move |DuplexStreamCallbackArgs { in_buffer, out_buffer, frames, .. }| {
-        let in_buffer: &[f32; BLOCK_SIZE] = unsafe { transmute(in_buffer.as_ptr()) };
-        match recorded_sound.try_push(*in_buffer) {
-            Some(_) => { println!("warning: sound buffer is full"); }
-            None => { }
+
+        unsafe {
+            assert_eq!(BLOCK_SIZE, in_buffer.len());
+            let in_buffer: &[f32; BLOCK_SIZE] = transmute(in_buffer.as_ptr());
+            match recorded_sound.try_push(*in_buffer) {
+                Some(_) => { println!("warning: sound buffer is full"); }
+                None => { }
+            }
         }
 
         if frames_elapsed % (441000 / 64) == 0 && frames_elapsed > 1500 {
@@ -94,6 +92,10 @@ fn dictionary_handler(recorded_sound: Consumer<[f32; BLOCK_SIZE]>, target: Arc<S
             };
 
             if let Some(DictionaryHandlerEvent::Refresh) = should_calculate_dictionary.try_pop() {
+                // TODO: Sound should be able to append samples and should calculate the MFCCs
+                // and mean MFCCs accordingly. That way, this operation will be constant time.
+                //
+                // The operation to append samples should accept a boxed iterator.
                 let sound = Sound::from_samples(buf.clone(), 44100., None);
                 let partitioner = Partitioner::new(Cow::Borrowed(&sound));
                 let splits = partitioner.threshold(3).depth(5).partition().unwrap();

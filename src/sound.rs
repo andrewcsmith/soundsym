@@ -17,8 +17,10 @@ use std::path::Path;
 use std::error::Error;
 use std::fmt;
 use std::{f64, i32};
-use std::rc::Rc;
 use std::sync::Arc;
+use std::fs::File;
+use std::io;
+use std::io::BufRead;
 
 use super::*;
 
@@ -248,16 +250,6 @@ impl Sound {
         self.max_power
     }
 
-    pub fn pitch_confidence(&self) -> f64 {
-        match self.formants {
-            Some(f) => f[3],
-            None => {
-                let mut work = Vec::with_capacity(self.samples.len());
-                self.mean_formants(&mut work)[3]
-            }
-        }
-    }
-
     pub fn len(&self) -> usize {
         self.samples.len()
     }
@@ -416,6 +408,18 @@ impl SoundSequence {
         Ok(SoundSequence::new(sounds))
     }
 
+    pub fn from_timestamps(sound: Arc<Sound>, timestamps: &[Timestamp]) -> Result<SoundSequence, String> {
+        Ok(SoundSequence::new(timestamps.iter().fold(Vec::with_capacity(timestamps.len()), |mut acc, timestamp| {
+            let &Timestamp(start, end, ref label) = timestamp.clone();
+            let start_sample = (start * sound.sample_rate() as f64).round() as usize;
+            let end_sample = (end * sound.sample_rate() as f64).round() as usize;
+            let samples: Vec<f64> = (sound.samples()[start_sample..(end_sample + 1)]).iter().cloned().collect();
+            let new_sound = Sound::from_samples(samples, sound.sample_rate(), label.clone());
+            acc.push(Arc::new(new_sound));
+            acc
+        })))
+    }
+
     /// Gets a reference to the list of sounds
     pub fn sounds(&self) -> &Vec<Arc<Sound>> {
         &self.sounds
@@ -459,46 +463,100 @@ impl SoundSequence {
     }
 }
 
-#[test]
-fn test_from_distances() {
-    let dict = SoundDictionary::from_path(Path::new("data/phonemes")).unwrap();
-    let start: Arc<Sound> = dict.sounds[4].clone();
-    let distances = vec![0.5, 0.4, 0.3, 0.6, 0.2];
-    let seq = SoundSequence::from_distances(&distances[..], start, &dict).unwrap();
-    for sound in seq.sounds() {
-        println!("{}", sound.name.clone().unwrap_or("(no name)".to_string()));
+pub struct Timestamp(f64, f64, Option<String>); 
+
+#[allow(unused)]
+pub fn audacity_labels_to_timestamps(path: &Path) -> Result<Vec<Timestamp>, io::Error> {
+    let mut file = try!(File::open(&path));
+    let mut reader = io::BufReader::new(file);
+
+    let mut line = String::new();
+    let mut timestamps = Vec::new();
+
+    while reader.read_line(&mut line).unwrap() > 0 {
+        {
+            let mut stamp = Timestamp(0., 0., None);
+            let mut split = line.trim().split('\t');
+            stamp.0 = split.next().map(|s| s.parse::<f64>()).unwrap_or(Ok(0.)).unwrap_or(0.);
+            stamp.1 = split.next().map(|s| s.parse::<f64>()).unwrap_or(Ok(0.)).unwrap_or(0.);
+            stamp.2 = split.next().map(|s| s.to_string());
+            timestamps.push(stamp);
+        }
+
+        line.clear();
     }
-    let concat = seq.to_sound();
-    concat.write_file(Path::new("tests/test_from_distances.wav")).unwrap();
+
+    Ok(timestamps)
 }
 
-#[test]
-fn test_sequence_to_sound() {
-    let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
-    let sounds = vec![
-        dict.sounds[4].clone(),
-        dict.sounds[8].clone(),
-        dict.sounds[12].clone()
-    ];
-    let seq = SoundSequence::new(sounds);
-    let concat = seq.to_sound();
-    concat.write_file(Path::new("tests/test_sequence_to_sound.wav")).unwrap();
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
 
-#[test]
-fn test_sound_should_match_itself() {
-    let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
-    let sound = &dict.sounds[4];
-    println!("{:?}", sound.mean_mfccs().0);
-    println!("{:?}", cosine_sim(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
-    println!("{:?}", cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
-    assert_eq!(cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0), 0.0);
-    assert_eq!(sound.samples(), dict.match_sound(sound).unwrap().samples());
-}
+    #[test]
+    fn test_audacity_labels_to_timestamps() {
+        let labels = Path::new("tests/vowel.txt");
+        let timestamps = audacity_labels_to_timestamps(&labels).unwrap();
+        assert!((timestamps[0].0 - 0.7065779155923718).abs() < 1e-10);
+        assert!((timestamps[26].1 - 5.59353222977394).abs() < 1e-10);
+        assert_eq!(timestamps[44].2, Some("ning".to_string()));
+        assert_eq!(timestamps.len(), 55);
+    }
 
-#[test]
-fn test_angular_distance() {
-    let mfccs = [0.1, 0.4, 0.2, 0.8];
-    assert_eq!(cosine_sim_angular(&mfccs[..], &mfccs[..]), 0.0);
+    #[test]
+    fn test_sound_sequence_from_timestamps() {
+        let sound = Sound::from_path(&Path::new("tests/Section_7_1.wav")).unwrap();
+        let timestamps = vec![
+            Timestamp(0.7065779155923718, 0.7619218551399829, Some("o".to_string())),
+            Timestamp(0.7619218551399829, 1.0201935730288352, Some("s".to_string()))
+        ];
+        let ss = SoundSequence::from_timestamps(Arc::new(sound), &timestamps[..]).unwrap();
+        assert_eq!(ss.sounds()[0].name, Some("o".to_string()));
+    }
+
+    #[test]
+    fn test_from_distances() {
+        let dict = SoundDictionary::from_path(Path::new("data/phonemes")).unwrap();
+        let start: Arc<Sound> = dict.sounds[4].clone();
+        let distances = vec![0.5, 0.4, 0.3, 0.6, 0.2];
+        let seq = SoundSequence::from_distances(&distances[..], start, &dict).unwrap();
+        for sound in seq.sounds() {
+            println!("{}", sound.name.clone().unwrap_or("(no name)".to_string()));
+        }
+        let concat = seq.to_sound();
+        concat.write_file(Path::new("tests/test_from_distances.wav")).unwrap();
+    }
+
+    #[test]
+    fn test_sequence_to_sound() {
+        let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
+        let sounds = vec![
+            dict.sounds[4].clone(),
+            dict.sounds[8].clone(),
+            dict.sounds[12].clone()
+        ];
+        let seq = SoundSequence::new(sounds);
+        let concat = seq.to_sound();
+        concat.write_file(Path::new("tests/test_sequence_to_sound.wav")).unwrap();
+    }
+
+    #[test]
+    fn test_sound_should_match_itself() {
+        let dict = SoundDictionary::from_path(Path::new("tests/dict")).unwrap();
+        let sound = &dict.sounds[4];
+        println!("{:?}", sound.mean_mfccs().0);
+        println!("{:?}", cosine_sim(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
+        println!("{:?}", cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0));
+        assert_eq!(cosine_sim_angular(&sound.mean_mfccs().0, &sound.mean_mfccs().0), 0.0);
+        assert_eq!(sound.samples(), dict.match_sound(sound).unwrap().samples());
+    }
+
+    #[test]
+    fn test_angular_distance() {
+        let mfccs = [0.1, 0.4, 0.2, 0.8];
+        assert_eq!(cosine_sim_angular(&mfccs[..], &mfccs[..]), 0.0);
+    }
 }
 
