@@ -81,12 +81,15 @@ fn run() -> Result<(), Box<Error>> {
 
 fn dictionary_handler(recorded_sound: Consumer<[f32; BLOCK_SIZE]>, target: Arc<SoundSequence>, sound_to_play: Producer<f64>, should_calculate_dictionary: Consumer<DictionaryHandlerEvent>) {
     thread::spawn(move || {
+        let mut sound = Sound::from_samples(Vec::<f64>::with_capacity(65536), 44100., None);
         let mut buf = Vec::<f64>::with_capacity(65536);
         loop {
             while let Some(incoming_sound) = recorded_sound.try_pop() {
                 for s in incoming_sound.iter() {
                     buf.push(*s as f64);
                 }
+                sound.push_samples(&buf[..]);
+                buf.clear();
             };
 
             if let Some(DictionaryHandlerEvent::Refresh) = should_calculate_dictionary.try_pop() {
@@ -94,7 +97,6 @@ fn dictionary_handler(recorded_sound: Consumer<[f32; BLOCK_SIZE]>, target: Arc<S
                 // and mean MFCCs accordingly. That way, this operation will be constant time.
                 //
                 // The operation to append samples should accept a boxed iterator.
-                let sound = Sound::from_samples(buf.clone(), 44100., None);
                 let partitioner = Partitioner::new(Cow::Borrowed(&sound));
                 let splits = partitioner.threshold(7).depth(7).partition().unwrap();
                 let dict = SoundDictionary::from_segments(&sound, &splits[..]);

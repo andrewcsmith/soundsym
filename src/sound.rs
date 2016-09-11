@@ -529,5 +529,12 @@ mod tests {
         assert_eq!(sound.samples().len(), 4096);
         assert_eq!(sound.num_frames(), 5);
     }
+
+    #[test]
+    fn test_empty_sound() {
+        let mut sound = Sound::from_samples(Vec::new(), 44100., None);
+        sound.push_samples(&vec![0f64; 4096]);
+        assert_eq!(sound.num_frames(), 5);
+    }
 }
 
