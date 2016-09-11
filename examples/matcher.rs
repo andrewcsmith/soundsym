@@ -37,14 +37,14 @@ fn run() -> Result<(), Box<Error>> {
 
         let phoneme = try!(Sound::from_path(&entry.path()));
         if phoneme.max_power() < 0.03 {
-            for _ in 0..phoneme.len() {
+            for _ in 0..phoneme.samples().len() {
                 try!(writer.write_sample(0));
             }
             // println!("{}, r, , ", &phoneme);
         } else {
             let sound = try!(dictionary.match_sound(&phoneme).ok_or(CosError("Problem matching sound.")));
             let samples: &Vec<f64> = sound.samples();
-            for sample in samples.iter().chain(iter::repeat(&0f64)).take(phoneme.len()) {
+            for sample in samples.iter().chain(iter::repeat(&0f64)).take(phoneme.samples().len()) {
                 try!(writer.write_sample((sample * i16::max_value() as f64 * 4f64.powf(phoneme.max_power())) as i16));
             }
             // println!("{}, {}", &phoneme, &sound);

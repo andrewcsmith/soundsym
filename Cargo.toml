@@ -6,7 +6,7 @@ authors = ["Andrew Smith <andrewchristophersmith@gmail.com>"]
 [dependencies]
 voting_experts = { path = "../voting_experts" }
 vox_box = { path = "../vox_box" }
-sample = "0.6.1"
+sample = { git = "https://github.com/andrewcsmith/sample.git" }
 hound = "1.1"
 cogset = { path = "../../../rust/cogset" }
 getopts = "0.2"

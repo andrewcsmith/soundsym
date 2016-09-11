@@ -250,14 +250,6 @@ impl Sound {
         self.max_power
     }
 
-    pub fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    pub fn name(&self) -> Option<String> {
-        self.name.clone()
-    }
-
     pub fn samples<'a>(&'a self) -> &Vec<f64> {
         &self.samples
     }

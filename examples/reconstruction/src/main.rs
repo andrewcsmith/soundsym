@@ -29,9 +29,7 @@ enum DictionaryHandlerEvent {
 
 fn run() -> Result<(), Box<Error>> {
     let pa = try!(PortAudio::new());
-    let mut settings: DuplexStreamSettings<f32, f32> = try!(pa.default_duplex_stream_settings(1, 1, 44100., BLOCK_SIZE as u32));
-    
-    // settings.out_params = StreamParameters::new(DeviceIndex(3), 1, true, 0.);
+    let settings: DuplexStreamSettings<f32, f32> = try!(pa.default_duplex_stream_settings(1, 1, 44100., BLOCK_SIZE as u32));
 
     let (recorded_sound, recorded_sound_recv) = bounded_spsc_queue::make::<[f32; BLOCK_SIZE]>(65536);
     let mut frames_elapsed: usize = 0;
