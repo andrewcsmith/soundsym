@@ -5,13 +5,10 @@ extern crate sample;
 
 use sample::{window, ToSampleSlice, FromSampleSlice};
 
-use vox_box;
-use vox_box::waves::Filter;
-use vox_box::spectrum::{Resonance, MFCC};
+use vox_box::spectrum::MFCC;
 
 use cogset::{Euclid};
 use blas::c::*;
-use self::num::complex::Complex;
 
 use std::path::Path;
 use std::error::Error;
@@ -76,8 +73,7 @@ pub struct Sound {
     samples: Vec<f64>,
     sample_rate: f64,
     mfccs: Vec<f64>,
-    mean_mfccs: Euclid<[f64; NCOEFFS]>,
-    formants: Option<[f64; 3]>
+    mean_mfccs: Euclid<[f64; NCOEFFS]>
 }
 
 impl fmt::Display for Sound {
@@ -89,61 +85,9 @@ impl fmt::Display for Sound {
 impl Sound {
     /// Generate a Sound from a Vec of f64 samples. Calculates max_power and mfccs.
     pub fn from_samples(samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
-        let mfcc_calc = |frame: &[f64]| -> Euclid<[f64; NCOEFFS]> { 
-            let mut mfccs = [0f64; NCOEFFS];
-            let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
-            for (i, c) in m.iter().enumerate() {
-                mfccs[i] = *c;
-            }
-            Euclid(mfccs)
-        };
-
-        let mut frame_buffer: Vec<f64> = Vec::with_capacity(HOP);
-
-        // A single vector of mfccs
-        let mfccs: Vec<f64> = window::Windower::hanning(
-            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), HOP, HOP)
-            .map(|frame| {
-                for s in frame {
-                    frame_buffer.extend_from_slice(<&[f64]>::to_sample_slice(&s[..]));
-                }
-                let mfccs = mfcc_calc(&frame_buffer[..]);
-                frame_buffer.clear();
-                mfccs
-            })
-            .fold(Vec::<f64>::with_capacity(samples.len() * NCOEFFS / HOP), |mut acc, v| {
-                acc.extend_from_slice(&v.0[..]);
-                acc
-            });
-
-        let max_power: f64 = window::Windower::rectangle(
-            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), 256, 512)
-            .map(|frame| {
-                let mut count: usize = 0;
-                (frame.fold(0., |acc, s| {
-                    let sample_slice: &[f64] = <&[f64]>::to_sample_slice(&s[..]);
-                    count += 1;
-                    acc + sample_slice[0].powi(2)
-                }) / count as f64).sqrt()
-            })
-            .fold(0., |acc, el| acc.max(el));
-
-        let mean_mfccs: Euclid<[f64; NCOEFFS]> = {
-            let nframes = mfccs.len() / NCOEFFS;
-            let mfcc_arrays: &[[f64; NCOEFFS]] = <&[[f64; NCOEFFS]]>::from_sample_slice(&mfccs[..]).unwrap();
-            let sums = mfcc_arrays.iter().fold([0f64; NCOEFFS], |mut acc, el| {
-                for (idx, s) in el.iter().enumerate() {
-                    acc[idx] += *s;
-                }
-                acc
-            });
-            let mean_iter = sums.iter().map(|el| el / nframes as f64);
-            let mut out = Euclid([0f64; NCOEFFS]);
-            for (idx, m) in (0..NCOEFFS).zip(mean_iter) {
-                out.0[idx] = m;
-            }
-            out
-        };
+        let mfccs = analyze_mfccs(sample_rate, &samples[..]);
+        let max_power = analyze_max_power(&samples[..]);
+        let mean_mfccs = analyze_mean_mfccs(&mfccs[..]);
 
         let sound = Sound { 
             max_power: max_power,
@@ -151,12 +95,9 @@ impl Sound {
             samples: samples,
             sample_rate: sample_rate,
             mfccs: mfccs,
-            mean_mfccs: mean_mfccs,
-            formants: None
+            mean_mfccs: mean_mfccs
         };
 
-        // let mut work = Vec::with_capacity(sound.samples.len());
-        // sound.formants = Some(sound.mean_formants(&mut work));
         sound
     }
 
@@ -190,62 +131,27 @@ impl Sound {
         Ok(())
     }
 
-    /// Calculate the mean formants of the Sound. 
-    ///
-    /// Returns values:
-    /// f1 frequency, f2 frequency, f3 frequency
-    pub fn mean_formants(&self, work: &mut Vec<f64>) -> [f64; 3] {
-        assert!(work.capacity() >= self.samples.len());
+    pub fn push_samples(&mut self, new_samples: &[f64]) {
+        let initial_frames = self.num_frames();
+        self.samples.extend_from_slice(new_samples);
+        let samples_to_analyze = &self.samples[initial_frames * HOP..];
 
-        let bin_size = 512;
-        let hop_size = 128;
-
-        work.clear();
-        work.clone_from(&self.samples);
-        let samples = work;
-        samples.preemphasis(50.0 / self.sample_rate);
-
-        let window = window::Windower::hanning(
-            <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), hop_size, bin_size);
-        let mut sum = [0f64; 3];
-        let mut size = 0usize;
-
-        let mut sample_buffer: Vec<f64> = Vec::with_capacity(bin_size);
-
-        let mut formants = [Resonance::new(0., 0.); 4];
-        for (idx, f) in vox_box::MALE_FORMANT_ESTIMATES.iter().enumerate() {
-            formants[idx].frequency = *f;
-        }
-
-        for frame in window {
-            for s in frame {
-                sample_buffer.extend_from_slice(&s[..].to_sample_slice());
+        {
+            let new_mfccs = analyze_mfccs(self.sample_rate, samples_to_analyze);
+            self.mfccs.extend_from_slice(&new_mfccs[..]);
+            let new_frames = self.num_frames() - initial_frames;
+            let new_mean_mfccs = analyze_mean_mfccs(&new_mfccs[..]);
+            for (coeff, new) in self.mean_mfccs.0.iter_mut().zip(new_mean_mfccs.0.iter()) {
+                *coeff = (*coeff * initial_frames as f64 + new * new_frames as f64) * 0.5;
             }
-
-            let n_coeffs = 14;
-            let mut work = vec![0f64; vox_box::find_formants_real_work_size(
-                sample_buffer.len(), n_coeffs)];
-            let mut complex_work = vec![Complex::<f64>::new(0., 0.); vox_box::find_formants_complex_work_size(n_coeffs)];
-
-            // TODO: Need to resample the buffer in order to make this accurate
-            vox_box::find_formants(&mut sample_buffer, self.sample_rate,
-                                   n_coeffs, &mut work[..], &mut complex_work[..], 
-                                   &mut formants[..]).unwrap();
-
-            sum[0] += formants.get(0).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
-            sum[1] += formants.get(1).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
-            sum[2] += formants.get(2).map(|r: &Resonance<f64>| r.frequency).unwrap_or(0.);
-            size += 1;
-            sample_buffer.clear();
         }
 
-        assert!(size > 0);
-        let scale = 1. / size as f64;
-        for v in sum.iter_mut() { *v *= scale; }
-
-        sum
+        {
+            let new_max_power = self.max_power.max(analyze_max_power(samples_to_analyze));
+            self.max_power = new_max_power;
+        }
     }
-    
+
     pub fn max_power(&self) -> f64 {
         self.max_power
     }
@@ -279,6 +185,70 @@ impl Sound {
     pub fn mean_mfccs(&self) -> &Euclid<[f64; NCOEFFS]> {
         &self.mean_mfccs
     }
+
+    pub fn num_frames(&self) -> usize {
+        self.mfccs.len() / NCOEFFS
+    }
+}
+
+fn analyze_mfccs(sample_rate: f64, samples: &[f64]) -> Vec<f64> {
+    let mfcc_calc = |frame: &[f64]| -> Euclid<[f64; NCOEFFS]> { 
+        let mut mfccs = [0f64; NCOEFFS];
+        let m = frame.mfcc(NCOEFFS, (100., 8000.), sample_rate as f64);
+        for (i, c) in m.iter().enumerate() {
+            mfccs[i] = *c;
+        }
+        Euclid(mfccs)
+    };
+
+    let mut frame_buffer: Vec<f64> = Vec::with_capacity(BIN);
+
+    // A single vector of mfccs
+    window::Windower::hanning(
+        <&[[f64; 1]]>::from_sample_slice(samples).unwrap(), BIN, HOP)
+        .map(|frame| {
+            for s in frame {
+                frame_buffer.extend_from_slice(<&[f64]>::to_sample_slice(&s[..]));
+            }
+            let mfccs = mfcc_calc(&frame_buffer[..]);
+            frame_buffer.clear();
+            mfccs
+        })
+        .fold(Vec::<f64>::with_capacity(samples.len() * NCOEFFS / BIN), |mut acc, v| {
+            acc.extend_from_slice(&v.0[..]);
+            acc
+        })
+}
+
+fn analyze_max_power(samples: &[f64]) -> f64 {
+    window::Windower::rectangle(
+        <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), BIN, HOP)
+        .map(|frame| {
+            let mut count: usize = 0;
+            (frame.fold(0., |acc, s| {
+                let sample_slice: &[f64] = <&[f64]>::to_sample_slice(&s[..]);
+                count += 1;
+                acc + sample_slice[0].powi(2)
+            }) / count as f64).sqrt()
+        })
+        .fold(0., |acc, el| acc.max(el))
+}
+
+fn analyze_mean_mfccs(mfccs: &[f64]) -> Euclid<[f64; NCOEFFS]> {
+    let nframes = mfccs.len() / NCOEFFS;
+    let mfcc_arrays: &[[f64; NCOEFFS]] = <&[[f64; NCOEFFS]]>::from_sample_slice(&mfccs[..]).unwrap();
+    let sums = mfcc_arrays.iter().fold([0f64; NCOEFFS], |mut acc, el| {
+        for (idx, s) in el.iter().enumerate() {
+            acc[idx] += *s;
+        }
+        acc
+    });
+    let mean_iter = sums.iter().map(|el| el / nframes as f64);
+    let mut out = Euclid([0f64; NCOEFFS]);
+    for (idx, m) in (0..NCOEFFS).zip(mean_iter) {
+        out.0[idx] = m;
+    }
+    out
 }
 
 /// Cache of Sounds that can be referenced using an outside sound, to find the "most similar"
@@ -549,6 +519,15 @@ mod tests {
     fn test_angular_distance() {
         let mfccs = [0.1, 0.4, 0.2, 0.8];
         assert_eq!(cosine_sim_angular(&mfccs[..], &mfccs[..]), 0.0);
+    }
+
+    #[test]
+    fn test_push_samples() {
+        let samples = vec![0f64; 2048];
+        let mut sound = Sound::from_samples(samples, 44100., None);
+        sound.push_samples(&vec![0f64; 2048][..]);
+        assert_eq!(sound.samples().len(), 4096);
+        assert_eq!(sound.num_frames(), 5);
     }
 }
 

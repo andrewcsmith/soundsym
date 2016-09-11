@@ -96,7 +96,7 @@ fn dictionary_handler(recorded_sound: Consumer<[f32; BLOCK_SIZE]>, target: Arc<S
                 // The operation to append samples should accept a boxed iterator.
                 let sound = Sound::from_samples(buf.clone(), 44100., None);
                 let partitioner = Partitioner::new(Cow::Borrowed(&sound));
-                let splits = partitioner.threshold(3).depth(5).partition().unwrap();
+                let splits = partitioner.threshold(7).depth(7).partition().unwrap();
                 let dict = SoundDictionary::from_segments(&sound, &splits[..]);
                 println!("nsegs: {}", dict.sounds.len());
                 let new_sound = target.clone_from_dictionary(&dict).unwrap().to_sound();

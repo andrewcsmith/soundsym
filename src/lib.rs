@@ -17,7 +17,8 @@ use std::cmp::PartialOrd;
 use std::i32;
 
 pub const NCOEFFS: usize = 16;
-pub const HOP: usize = 2048;
+pub const HOP: usize = 512;
+pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
@@ -181,6 +182,6 @@ mod tests {
         println!("max_power: {}", sound.max_power());
         println!("max sample: {}", samples[0]);
         assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-        assert!((sound.max_power() - 0.2394398137328704).abs() < 1e-12);
+        assert!((sound.max_power() - 0.1920468639173821).abs() < 1e-12);
     }
 }
