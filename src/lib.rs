@@ -16,7 +16,7 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-pub const NCOEFFS: usize = 16;
+pub const NCOEFFS: usize = 26;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
@@ -175,7 +175,7 @@ mod tests {
         let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
         let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
         let sample_rate = file.spec().sample_rate;
-        let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None);
+        let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None, None);
         samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
         println!("max i32: {}", i16::max_value());
         // println!("max val: {}", max_val);

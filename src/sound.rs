@@ -84,8 +84,8 @@ impl fmt::Display for Sound {
 
 impl Sound {
     /// Generate a Sound from a Vec of f64 samples. Calculates max_power and mfccs.
-    pub fn from_samples(samples: Vec<f64>, sample_rate: f64, name: Option<String>) -> Sound {
-        let mfccs = analyze_mfccs(sample_rate, &samples[..]);
+    pub fn from_samples(samples: Vec<f64>, sample_rate: f64, mfccs: Option<Vec<f64>>, name: Option<String>) -> Sound {
+        let mfccs: Vec<f64> = mfccs.unwrap_or(analyze_mfccs(sample_rate, &samples[..]));
         let max_power = analyze_max_power(&samples[..]);
         let mean_mfccs = analyze_mean_mfccs(&mfccs[..]);
 
@@ -112,7 +112,7 @@ impl Sound {
         let tag = path.file_stem()
             .map(|s| s.to_os_string())
             .and_then(|s| s.into_string().ok());
-        Ok(Sound::from_samples(samples.clone(), sample_rate as f64, tag))
+        Ok(Sound::from_samples(samples.clone(), sample_rate as f64, None, tag))
     }
 
     /// Writes the Sound to a 32-bit WAV file.
@@ -296,9 +296,11 @@ impl SoundDictionary {
     pub fn add_segments(&mut self, sound: &Sound, segments: &[usize]) {
         self.sounds.reserve(segments.len());
         let mut samples = sound.samples().iter();
+        let mut mfccs = sound.mfccs().iter();
         for seg in segments {
-            let samp = samples.by_ref().take(*seg).map(|s| *s).collect();
-            self.sounds.push(Arc::new(Sound::from_samples(samp, sound.sample_rate(), None)));
+            let samp: Vec<f64> = samples.by_ref().take(*seg).map(|s| *s).collect();
+            let mfccs: Vec<f64> = mfccs.by_ref().take(*seg / HOP * NCOEFFS).map(|s| *s).collect();
+            self.sounds.push(Arc::new(Sound::from_samples(samp, sound.sample_rate(), Some(mfccs), None)));
         }
     }
 
@@ -376,7 +378,7 @@ impl SoundSequence {
             let start_sample = (start * sound.sample_rate() as f64).round() as usize;
             let end_sample = (end * sound.sample_rate() as f64).round() as usize;
             let samples: Vec<f64> = (sound.samples()[start_sample..(end_sample + 1)]).iter().cloned().collect();
-            let new_sound = Sound::from_samples(samples, sound.sample_rate(), label.clone());
+            let new_sound = Sound::from_samples(samples, sound.sample_rate(), None, label.clone());
             acc.push(Arc::new(new_sound));
             acc
         })))
@@ -421,7 +423,7 @@ impl SoundSequence {
             samples.extend_from_slice(&sound.samples[..]);
         }
         let sample_rate = self.sounds.get(0).map(|s| s.sample_rate).unwrap_or(44100.);
-        Sound::from_samples(samples, sample_rate, None)
+        Sound::from_samples(samples, sample_rate, None, None)
     }
 }
 
@@ -524,7 +526,7 @@ mod tests {
     #[test]
     fn test_push_samples() {
         let samples = vec![0f64; 2048];
-        let mut sound = Sound::from_samples(samples, 44100., None);
+        let mut sound = Sound::from_samples(samples, 44100., None, None);
         sound.push_samples(&vec![0f64; 2048][..]);
         assert_eq!(sound.samples().len(), 4096);
         assert_eq!(sound.num_frames(), 5);
@@ -532,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_empty_sound() {
-        let mut sound = Sound::from_samples(Vec::new(), 44100., None);
+        let mut sound = Sound::from_samples(Vec::new(), 44100., None, None);
         sound.push_samples(&vec![0f64; 4096]);
         assert_eq!(sound.num_frames(), 5);
     }
