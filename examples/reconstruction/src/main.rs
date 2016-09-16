@@ -6,14 +6,15 @@ extern crate crossbeam;
 extern crate bounded_spsc_queue;
 extern crate piston_window;
 extern crate find_folder;
+extern crate input;
 
 #[macro_use] extern crate conrod;
 
 use soundsym::*;
 use portaudio::{Continue, DuplexStreamCallbackArgs, DuplexStreamSettings, PortAudio};
+use crossbeam::sync::SegQueue;
 
 use std::borrow::Cow;
-use std::path::Path;
 use std::sync::Arc;
 use std::mem::transmute;
 use bounded_spsc_queue::{Producer, Consumer};
@@ -44,12 +45,15 @@ fn run() -> Result<(), Error> {
 
         // Initialize the command queues
         let (input_buffer_producer, input_buffer_receiver) = bounded_spsc_queue::make::<[f32; BLOCK_SIZE]>(65536);
-        let (audio_playback_producer, audio_playback_receiver) = bounded_spsc_queue::make::<f64>(target.samples().len() * 2);
+        let audio_playback_queue = Arc::new(SegQueue::<f64>::new());
         let (dictionary_commands_producer, dictionary_commands_receiver) = bounded_spsc_queue::make::<DictionaryHandlerEvent>(256);
         let (audio_commands_producer, audio_commands_receiver) = bounded_spsc_queue::make::<AudioHandlerEvent>(256);
 
-        scope.spawn(move || dictionary_handler(input_buffer_receiver, target_sequence.clone(), audio_playback_producer, dictionary_commands_receiver));
-        scope.spawn(move || audio_handler(input_buffer_producer, audio_playback_receiver, audio_commands_receiver));
+        let apq1 = audio_playback_queue.clone();
+        let apq2 = audio_playback_queue.clone();
+
+        scope.spawn(move || dictionary_handler(input_buffer_receiver, target_sequence, apq1, dictionary_commands_receiver));
+        scope.spawn(move || audio_handler(input_buffer_producer, apq2, audio_commands_receiver));
         
         match gui_handler(audio_commands_producer, dictionary_commands_producer) {
             Err(e) => { 
@@ -82,8 +86,24 @@ fn gui_handler(audio_commands_producer: Producer<AudioHandlerEvent>, dictionary_
     let image_map = conrod::image::Map::new();
 
     while let Some(event) = window.next() {
+        use input::{Event, Input, Button};
+        use input::keyboard::Key;
+
         if let Some(e) = conrod::backend::piston_window::convert_event(event.clone(), &window) {
             ui.handle_event(e);
+        }
+
+        // Handle the raw events, primarily keyboard events
+        match event {
+            Event::Input(Input::Press(Button::Keyboard(key))) => { 
+                match key {
+                    Key::Space => {
+                        dictionary_commands_producer.push(DictionaryHandlerEvent::Refresh);
+                    }
+                    _ => { }
+                }
+            }
+            _ => { }
         }
 
         event.update(|_| {
@@ -119,7 +139,7 @@ fn gui_handler(audio_commands_producer: Producer<AudioHandlerEvent>, dictionary_
     Ok(())
 }
 
-fn audio_handler(input_buffer_producer: Producer<[f32; BLOCK_SIZE]>, audio_playback_receiver: Consumer<f64>, audio_commands_receiver: Consumer<AudioHandlerEvent>) -> Result<(), Error> {
+fn audio_handler(input_buffer_producer: Producer<[f32; BLOCK_SIZE]>, audio_playback_queue: Arc<SegQueue<f64>>, audio_commands_receiver: Consumer<AudioHandlerEvent>) -> Result<(), Error> {
     use AudioHandlerEvent::*;
 
     let pa = try!(PortAudio::new());
@@ -137,7 +157,7 @@ fn audio_handler(input_buffer_producer: Producer<[f32; BLOCK_SIZE]>, audio_playb
         }
 
         for s in out_buffer.iter_mut() {
-            match audio_playback_receiver.try_pop() {
+            match audio_playback_queue.try_pop() {
                 Some(input) => { *s = input as f32 }
                 None => { *s = 0. }
             }
@@ -163,7 +183,7 @@ fn audio_handler(input_buffer_producer: Producer<[f32; BLOCK_SIZE]>, audio_playb
     Ok(())
 }
 
-fn dictionary_handler(input_buffer_receiver: Consumer<[f32; BLOCK_SIZE]>, target_sequence: Arc<SoundSequence>, audio_buffer_producer: Producer<f64>, dictionary_commands_receiver: Consumer<DictionaryHandlerEvent>) {
+fn dictionary_handler(input_buffer_receiver: Consumer<[f32; BLOCK_SIZE]>, target_sequence: Arc<SoundSequence>, audio_playback_queue: Arc<SegQueue<f64>>, dictionary_commands_receiver: Consumer<DictionaryHandlerEvent>) {
     use DictionaryHandlerEvent::*;
 
     let mut sound = Sound::from_samples(Vec::<f64>::with_capacity(65536), 44100., None, None);
@@ -188,8 +208,7 @@ fn dictionary_handler(input_buffer_receiver: Consumer<[f32; BLOCK_SIZE]>, target
                 println!("samps: {}", new_sound.samples().len());
 
                 for s in new_sound.samples() {
-                    // Blocks until there's space for new sound
-                    audio_buffer_producer.push(*s);
+                    audio_playback_queue.push(*s);
                 }
             }
             Some(Quit) => {
