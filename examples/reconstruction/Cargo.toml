@@ -5,10 +5,11 @@ authors = ["Andrew Smith <andrewchristophersmith@gmail.com>"]
 
 [dependencies]
 soundsym = { path = "../../" }
-vox_box = { path = "../../../vox_box" }
+vox_box = "0.2.2"
 portaudio = "0.7.0"
 hound = "2.0"
 bounded-spsc-queue = "0.1.2"
 crossbeam = "0.2"
 conrod = "0.44"
 piston_window = "0.52"
+find_folder = "*"
