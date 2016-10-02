@@ -39,7 +39,7 @@ fn main() {
 
     let mut sounds: Vec<Sound> = splits.iter().map(|split| {
         let sound_samples: Vec<f64> = samples.by_ref().take(*split).collect();
-        Sound::from_samples(sound_samples, sample_rate as f64, None)
+        Sound::from_samples(sound_samples, sample_rate as f64, None, None)
     }).collect();
 
     sounds.sort_by(|a, b| a.max_power().partial_cmp(&b.max_power()).unwrap_or(Ordering::Equal));
