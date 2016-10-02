@@ -1,12 +1,15 @@
 extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
-extern crate cogset;
+extern crate rusty_machine;
 extern crate blas;
 extern crate sample;
 
-use cogset::{Euclid, Kmeans, KmeansBuilder};
 use voting_experts::{cast_votes, split_string};
+
+use rusty_machine::prelude::*;
+use rusty_machine::learning::gmm::GaussianMixtureModel;
+use rusty_machine::data::transforms::{Transformer, Standardizer};
 
 use std::path::Path;
 use std::error::Error;
@@ -16,20 +19,24 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
+use blas::c::*;
+
 pub const NCOEFFS: usize = 12;
+pub const NCLUSTERS: usize = 8;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
-
 pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_labels_to_timestamps};
 
-/// Clumps the various Euclid points using Kmeans.
-pub fn discretize(data: &[Euclid<[f64; NCOEFFS]>]) -> Kmeans<[f64; NCOEFFS]> {
-    let k = 50;
-    let tol = 1e-12;
-    KmeansBuilder::new().tolerance(tol).kmeans(data, k)
+pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
+    let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data.clone()).unwrap();
+    gmm.set_max_iters(100);
+    gmm.train(&transformed).unwrap();
+    gmm.predict(&transformed).unwrap()
 }
 
 /// Partitions a sound file (from a path) into individual phonemes. It is possible to set the
@@ -73,22 +80,26 @@ impl<'a> Partitioner<'a> {
     /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
     /// the phoneme.
     pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
-        let mfccs = self.sound.euclid_mfccs();
-        let clusters = discretize(&mfccs[..]).clusters();
+        let cols = NCOEFFS;
+        let rows = self.sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
+        // println!("##DATA \n{}", &data);
+        let predictions = discretize(&data);
 
+        // println!("##PREDICTIONS \n{}", &predictions);
         // Symbol to start the gibberish from
         let start_symbol = 'A' as u8;
         // Initialize memory for a u8 vector with one element per mfcc frame
-        let mut byte_string = vec![0u8; mfccs.len()];
+        let mut byte_string = vec![0u8; rows];
         // Look up the frame of each element in each cluster, and assign to it that cluster's label.
-        for (idx, cluster) in clusters.iter().enumerate() {
-            let value = idx as u8 + start_symbol;
-            for &index in cluster.1.iter() {
-                byte_string[index] = value as u8;
-            }
+        // row: &[f64]
+        for (idx, row) in predictions.iter_rows().enumerate() {
+            let max_idx: u8 = idamax(row.len() as i32, row, 1) as u8;
+            byte_string[idx] = max_idx + start_symbol;
         }
 
         let text_string = try!(from_utf8(&byte_string[..]));
+        // println!("{}", &text_string);
         let votes = cast_votes(&text_string, self.depth);
         let splits = split_string(&text_string, &votes, self.depth, self.threshold);
         let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
@@ -158,6 +169,7 @@ impl std::cmp::Ord for OrdF64 {
 mod tests {
     extern crate hound;
 
+    use rusty_machine::prelude::*;
     use super::*;
     use std::path::Path;
     use std::cmp::Ordering;
@@ -166,8 +178,14 @@ mod tests {
     fn test_discretize() {
         let path = Path::new("data/sample.wav");
         let sound = Sound::from_path(path).unwrap();
-        let kmeans = discretize(&sound.euclid_mfccs()[..]);
-        let clusters = kmeans.clusters();
+        let cols = NCOEFFS;
+        let rows = sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
+        println!("data: \n{}", &data);
+        let predictions = discretize(&data);
+        println!("predictions: \n{:?}", predictions);
+        assert_eq!(predictions.rows(), sound.mfcc_arrays().len());
+        assert_eq!(predictions.cols(), NCLUSTERS);
     }
 
     #[test]
