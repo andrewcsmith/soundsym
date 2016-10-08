@@ -12,10 +12,7 @@ getopts = "0.2"
 accelerate-provider = "0.2"
 num = "*"
 time = "*"
-
-[dependencies.rusty-machine]
-version = "0.5"
-git = "https://github.com/athemathmo/rusty-machine.git"
+rusty-machine = "0.5.1"
 
 [dependencies.blas]
 version = "0.14"
