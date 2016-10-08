@@ -68,11 +68,11 @@ fn main() {
 
     new_time = time::get_time();
     println!("time to partition: {}", new_time - current_time);
+    println!("splits: {:?}", &splits);
 
     match matches.opt_str("o") {
         Some(out_str) => {
             println!("{}", &out_str);
-            println!("{:?}", &splits);
             let out_path = Path::new(&out_str[..]);
             write_splits(&partitioner.sound, &splits[..], &out_path).unwrap();
         }
