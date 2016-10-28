@@ -22,7 +22,8 @@ fn run() -> Result<(), Box<Error>> {
     let spec = WavSpec {
         channels: 1,
         sample_rate: 44100,
-        bits_per_sample: 16
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
     };
 
     let mut writer = try!(WavWriter::create("data/concat.wav", spec));

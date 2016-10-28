@@ -119,7 +119,8 @@ impl Sound {
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: self.sample_rate as u32,
-            bits_per_sample: 32
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Int
         };
 
         let mut file = try!(hound::WavWriter::create(&path, spec));
@@ -539,15 +540,15 @@ mod tests {
     fn test_push_samples() {
         let samples = vec![0f64; 2048];
         let mut sound = Sound::from_samples(samples, 44100., None, None);
-        sound.push_samples(&vec![0f64; 2048][..]);
-        assert_eq!(sound.samples().len(), 4096);
+        sound.push_samples(&vec![0f64; 2048 + 1024][..]);
+        assert_eq!(sound.samples().len(), 5120);
         assert_eq!(sound.num_frames(), 5);
     }
 
     #[test]
     fn test_empty_sound() {
         let mut sound = Sound::from_samples(Vec::new(), 44100., None, None);
-        sound.push_samples(&vec![0f64; 4096]);
+        sound.push_samples(&vec![0f64; 4096 + 1024]);
         assert_eq!(sound.num_frames(), 5);
     }
 }

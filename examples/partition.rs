@@ -4,6 +4,7 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate getopts;
+extern crate rusty_machine;
 
 use std::path::Path;
 use std::borrow::Cow;
@@ -11,6 +12,7 @@ use std::env;
 
 use soundsym::*;
 use getopts::Options;
+use rusty_machine::prelude::*;
 
 /*
  * Release mode benchmarks:
@@ -52,23 +54,31 @@ fn main() {
     println!("time to initialize: {}", new_time - current_time);
     current_time = new_time;
 
-    let path = Path::new("data/phrase.wav");
+    let path = Path::new("data/inventing.wav");
     let sound = Sound::from_path(path).unwrap();
 
     new_time = time::get_time();
     println!("time to initialize sound: {}", new_time - current_time);
     current_time = new_time;
 
-    let partitioner = Partitioner::new(Cow::Owned(sound))
+    let mut partitioner = Partitioner::new(Cow::Owned(sound))
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
-    let splits = partitioner.partition().unwrap();
+
+    partitioner.train().unwrap();
+    let cols = NCOEFFS;
+    let rows = partitioner.sound.mfccs().len() / NCOEFFS;
+
+    let data: Matrix<f64> = Matrix::new(rows, cols, partitioner.sound.mfccs().to_owned());
+    let predictions = partitioner.predict(&data).unwrap();
+    let splits = partitioner.partition(predictions).unwrap();
 
     new_time = time::get_time();
     println!("time to partition: {}", new_time - current_time);
     println!("splits: {:?}", &splits);
+    println!("found {} partitions", splits.len());
 
     match matches.opt_str("o") {
         Some(out_str) => {

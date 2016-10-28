@@ -1,4 +1,5 @@
 extern crate soundsym;
+extern crate rusty_machine;
 extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
@@ -10,6 +11,9 @@ use std::cmp::Ordering;
 
 use soundsym::*;
 use getopts::Options;
+
+use rusty_machine::prelude::*;
+
 
 /// Arranges the phonemes in a sound file in order of increasing loudness.
 fn main() {
@@ -27,12 +31,20 @@ fn main() {
 
     let path = Path::new(&input_file);
 
-    let splits = Partitioner::from_path(&path).unwrap()
+    let mut partitioner = Partitioner::from_path(&path).unwrap()
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")
-               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4))
-        .partition().unwrap();
+               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
+
+    partitioner.train().unwrap();
+    let cols = NCOEFFS;
+    let rows = partitioner.sound.mfccs().len() / NCOEFFS;
+
+    let data: Matrix<f64> = Matrix::new(rows, cols, partitioner.sound.mfccs().to_owned());
+    let predictions = partitioner.predict(&data).unwrap();
+    let splits = partitioner.partition(predictions).unwrap();
+
 
     let mut input = hound::WavReader::open(&path).expect("Could not open input file");
     let spec = input.spec();

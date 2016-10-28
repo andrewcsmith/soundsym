@@ -6,10 +6,9 @@ extern crate blas;
 extern crate sample;
 
 use voting_experts::{cast_votes, split_string};
-
 use rusty_machine::prelude::*;
-use rusty_machine::learning::gmm::GaussianMixtureModel;
-use rusty_machine::data::transforms::{Transformer, Standardizer};
+use rusty_machine::learning::k_means::{KPlusPlus, KMeansClassifier};
+use rusty_machine::data::transforms::{Standardizer, Transformer};
 
 use std::path::Path;
 use std::error::Error;
@@ -21,23 +20,14 @@ use std::i32;
 
 use blas::c::*;
 
-pub const NCOEFFS: usize = 12;
-pub const NCLUSTERS: usize = 8;
-pub const HOP: usize = 512;
-pub const BIN: usize = 2048;
-pub const PREEMPHASIS: f64 = 150f64;
+pub const NCOEFFS: usize = 14;
+pub const NCLUSTERS: usize = 30;
+pub const HOP: usize = 256;
+pub const BIN: usize = 4096;
+pub const PREEMPHASIS: f64 = 75f64;
 
 mod sound;
 pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_labels_to_timestamps};
-
-pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
-    let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
-    let mut transformer = Standardizer::default();
-    let transformed = transformer.transform(data.clone()).unwrap();
-    gmm.set_max_iters(100);
-    gmm.train(&transformed).unwrap();
-    gmm.predict(&transformed).unwrap()
-}
 
 /// Partitions a sound file (from a path) into individual phonemes. It is possible to set the
 /// depth of the trie and the threshold of votes needed to draw a boundary line. 
@@ -47,15 +37,19 @@ pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
 pub struct Partitioner<'a> {
     pub sound: Cow<'a, Sound>,
     pub depth: usize,
-    pub threshold: usize
+    pub threshold: usize,
+    pub model: KMeansClassifier<KPlusPlus>,
 }
 
 impl<'a> Partitioner<'a> {
     pub fn new(sound: Cow<'a, Sound>) -> Self {
+        let mut model = KMeansClassifier::new(NCLUSTERS);
+        model.set_iters(50);
         Partitioner {
             sound: sound,
             depth: 5,
-            threshold: 4
+            threshold: 4,
+            model: model,
         }
     }
 
@@ -76,21 +70,43 @@ impl<'a> Partitioner<'a> {
         self
     }
 
-    /// Executes the partition. On success, returns a tuple containing the path of the file
-    /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
-    /// the phoneme.
-    pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
+    pub fn train(&mut self) -> Result<(), Box<Error>> {
         let cols = NCOEFFS;
         let rows = self.sound.mfccs().len() / NCOEFFS;
         let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
         // println!("##DATA \n{}", &data);
-        let predictions = discretize(&data);
+        let mut transformer = Standardizer::default();
+        let data = transformer.transform(data.clone()).unwrap();
 
+        // Retry forever.
+        while let Err(e) = self.model.train(&data) {
+            println!("Error: {}", e);
+            // Use the following if training a GaussianMixtureModel
+            // model.cov_option.reg_covar += 0.01;
+            // println!("New reg_covar is {}", model.cov_option.reg_covar);
+        }
+
+        Ok(())
+    }
+
+    pub fn predict(&self, data: &Matrix<f64>) -> Result<Matrix<f64>, Box<Error>> {
+        let cols = self.model.predict(&data).unwrap();
+        let mut out = Matrix::zeros(data.rows(), NCLUSTERS);
+        for (row, col) in out.iter_rows_mut().zip(cols.iter()) {
+            row[*col] = 1.;
+        }
+        Ok(out)
+    }
+
+    /// Executes the partition. On success, returns a tuple containing the path of the file
+    /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
+    /// the phoneme.
+    pub fn partition(&self, predictions: Matrix<f64>) -> Result<Vec<usize>, Box<Error>> {
         // println!("##PREDICTIONS \n{}", &predictions);
         // Symbol to start the gibberish from
         let start_symbol = 'A' as u8;
         // Initialize memory for a u8 vector with one element per mfcc frame
-        let mut byte_string = vec![0u8; rows];
+        let mut byte_string = vec![0u8; predictions.rows()];
         // Look up the frame of each element in each cluster, and assign to it that cluster's label.
         // row: &[f64]
         for (idx, row) in predictions.iter_rows().enumerate() {
@@ -99,7 +115,7 @@ impl<'a> Partitioner<'a> {
         }
 
         let text_string = try!(from_utf8(&byte_string[..]));
-        // println!("{}", &text_string);
+        println!("{}", &text_string);
         let votes = cast_votes(&text_string, self.depth);
         let splits = split_string(&text_string, &votes, self.depth, self.threshold);
         let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
@@ -116,7 +132,8 @@ pub fn write_splits(sound: &Sound, splits: &[usize], out_path: &Path) -> Result<
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: sample_rate,
-        bits_per_sample: 32
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Int,
     };
 
     // Works through the samples in order, writing files to disk
@@ -175,20 +192,6 @@ mod tests {
     use std::cmp::Ordering;
 
     #[test]
-    fn test_discretize() {
-        let path = Path::new("data/sample.wav");
-        let sound = Sound::from_path(path).unwrap();
-        let cols = NCOEFFS;
-        let rows = sound.mfccs().len() / NCOEFFS;
-        let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
-        println!("data: \n{}", &data);
-        let predictions = discretize(&data);
-        println!("predictions: \n{:?}", predictions);
-        assert_eq!(predictions.rows(), sound.mfcc_arrays().len());
-        assert_eq!(predictions.cols(), NCLUSTERS);
-    }
-
-    #[test]
     fn test_sound_from_samples() {
         let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
         let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
@@ -200,6 +203,6 @@ mod tests {
         println!("max_power: {}", sound.max_power());
         println!("max sample: {}", samples[0]);
         assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-        assert!((sound.max_power() - 0.1920468639173821).abs() < 1e-12);
+        assert!((sound.max_power() - 0.18730848034829456).abs() < 1e-12);
     }
 }
