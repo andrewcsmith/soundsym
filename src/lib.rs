@@ -4,6 +4,7 @@ extern crate hound;
 extern crate rusty_machine;
 extern crate blas;
 extern crate sample;
+extern crate rayon;
 
 use voting_experts::{cast_votes, split_string};
 use rusty_machine::prelude::*;

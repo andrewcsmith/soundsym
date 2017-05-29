@@ -11,6 +11,7 @@ use vox_box::periodic::Pitched;
 use sound::num::Float;
 
 use blas::c::*;
+use rayon::prelude::*;
 
 use std::path::Path;
 use std::error::Error;
@@ -72,6 +73,7 @@ pub struct Sound {
     /// Name for reference, often the filename. Can be changed at will.
     pub name: Option<String>,
     max_power: f64,
+    pitch_confidence: Option<f64>,
     samples: Vec<f64>,
     sample_rate: f64,
     mfccs: Vec<f64>,
@@ -93,6 +95,7 @@ impl Sound {
 
         let sound = Sound { 
             max_power: max_power,
+            pitch_confidence: None,
             name: name,
             samples: samples,
             sample_rate: sample_rate,
@@ -160,13 +163,14 @@ impl Sound {
     }
 
     pub fn pitch_confidence(&self) -> f64 {
-        let maxima: f64 = self.samples.to_sample_slice().max_amplitude();
-        // Window the sound and find the maximum pitch confidence anywhere in the sound
-        let frame_slice: &[[f64; 1]] = &self.samples[..].to_frame_slice().unwrap();
-        window::Windower::hanning(frame_slice, 2048, 1024).map(|chunk| {
-            let chunk_data: Vec<[f64; 1]> = chunk.collect();
-            chunk_data.to_sample_slice().pitch::<window::Hanning>(44100., 0.2, 0.05, maxima, maxima, 0.01, 100., 500.)
-        }).fold(f64::NAN, |acc, x| x[0].strength.max(acc))
+        match self.pitch_confidence {
+            Some(x) => x,
+            None => analyze_pitch_confidence(&self.samples[..])
+        }
+    }
+
+    pub fn preload_pitch_confidence(&mut self) {
+        self.pitch_confidence = Some(analyze_pitch_confidence(&self.samples[..]));
     }
 
     pub fn samples<'a>(&'a self) -> &Vec<f64> {
@@ -246,6 +250,16 @@ fn analyze_max_power(samples: &[f64]) -> f64 {
         .fold(0., |acc, el| acc.max(el))
 }
 
+fn analyze_pitch_confidence(samples: &[f64]) -> f64 {
+    let maxima: f64 = samples.to_sample_slice().max_amplitude();
+    // Window the sound and find the maximum pitch confidence anywhere in the sound
+    let frame_slice: &[[f64; 1]] = &samples[..].to_frame_slice().unwrap();
+    window::Windower::hanning(frame_slice, 2048, 1024).map(|chunk| {
+        let chunk_data: Vec<[f64; 1]> = chunk.collect();
+        chunk_data.to_sample_slice().pitch::<window::Hanning>(44100., 0.2, 0.05, maxima, maxima, 0.01, 100., 500.)
+    }).fold(0., |acc, x| x[0].strength.max(acc))
+}
+
 fn analyze_mean_mfccs(mfccs: &[f64]) -> [f64; NCOEFFS] {
     let nframes = mfccs.len() / NCOEFFS;
     let mfcc_arrays: &[[f64; NCOEFFS]] = <&[[f64; NCOEFFS]]>::from_sample_slice(&mfccs[..]).unwrap();
@@ -306,14 +320,19 @@ impl SoundDictionary {
 
     /// Adds segments from a given Sound into the dictionary
     pub fn add_segments(&mut self, sound: &Sound, segments: &[usize]) {
-        self.sounds.reserve(segments.len());
+        let mut new_sounds: Vec<Arc<Sound>> = Vec::with_capacity(segments.len());
         let mut samples = sound.samples().iter();
         let mut mfccs = sound.mfccs().iter();
-        for seg in segments {
+        segments.iter().map(|seg| {
             let samp: Vec<f64> = samples.by_ref().take(*seg).map(|s| *s).collect();
             let mfccs: Vec<f64> = mfccs.by_ref().take(*seg / HOP * NCOEFFS).map(|s| *s).collect();
-            self.sounds.push(Arc::new(Sound::from_samples(samp, sound.sample_rate(), Some(mfccs), None)));
-        }
+            (samp, mfccs)
+        }).collect::<Vec<(Vec<f64>, Vec<f64>)>>().into_par_iter().map(|(samp, mfccs)| {
+            let mut sound = Sound::from_samples(samp, sound.sample_rate(), Some(mfccs), None);
+            sound.preload_pitch_confidence();
+            Arc::new(sound)
+        }).collect_into(&mut new_sounds);
+        self.sounds.extend(new_sounds);
     }
 
     /// Finds the most similar Sound in the SoundDictionary to `other`
