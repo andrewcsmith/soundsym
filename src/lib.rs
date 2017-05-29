@@ -186,7 +186,6 @@ impl std::cmp::Ord for OrdF64 {
 mod tests {
     extern crate hound;
 
-    use rusty_machine::prelude::*;
     use super::*;
     use std::path::Path;
     use std::cmp::Ordering;

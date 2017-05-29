@@ -10,9 +10,9 @@ vox_box = "0.2.3"
 hound = "2.0"
 getopts = "0.2"
 accelerate-provider = "0.2"
-num = "*"
-time = "*"
-rusty-machine = { path = "/Users/acsmith/workspaces/rust/rusty-machine" }
+rusty-machine = "0.5"
+num = "0.1"
+time = "0.1"
 
 [dependencies.blas]
 version = "0.14"
