@@ -3,9 +3,12 @@ extern crate hound;
 extern crate num;
 extern crate sample;
 
-use sample::{window, ToSampleSlice, FromSampleSlice};
+use sample::{window, ToSampleSlice, FromSampleSlice, ToFrameSlice};
 
 use vox_box::spectrum::MFCC;
+use vox_box::waves::MaxAmplitude;
+use vox_box::periodic::Pitched;
+use sound::num::Float;
 
 use blas::c::*;
 
@@ -154,6 +157,16 @@ impl Sound {
 
     pub fn max_power(&self) -> f64 {
         self.max_power
+    }
+
+    pub fn pitch_confidence(&self) -> f64 {
+        let maxima: f64 = self.samples.to_sample_slice().max_amplitude();
+        // Window the sound and find the maximum pitch confidence anywhere in the sound
+        let frame_slice: &[[f64; 1]] = &self.samples[..].to_frame_slice().unwrap();
+        window::Windower::hanning(frame_slice, 2048, 1024).map(|chunk| {
+            let chunk_data: Vec<[f64; 1]> = chunk.collect();
+            chunk_data.to_sample_slice().pitch::<window::Hanning>(44100., 0.2, 0.05, maxima, maxima, 0.01, 100., 500.)
+        }).fold(f64::NAN, |acc, x| x[0].strength.max(acc))
     }
 
     pub fn samples<'a>(&'a self) -> &Vec<f64> {
