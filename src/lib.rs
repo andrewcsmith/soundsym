@@ -177,30 +177,31 @@ mod tests {
 
     #[test]
     fn test_discretize() {
-        let path = Path::new("data/sample.wav");
+        let path = Path::new("tests/sample.wav");
         let sound = Sound::from_path(path).unwrap();
         let cols = NCOEFFS;
         let rows = sound.mfccs().len() / NCOEFFS;
         let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
-        println!("data: \n{}", &data);
+        // println!("data: \n{}", &data);
         let predictions = discretize(&data);
-        println!("predictions: \n{:?}", predictions);
+        // println!("predictions: \n{:?}", predictions);
         assert_eq!(predictions.rows(), sound.mfcc_arrays().len());
         assert_eq!(predictions.cols(), NCLUSTERS);
     }
 
     #[test]
     fn test_sound_from_samples() {
-        let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
+        let mut file = hound::WavReader::open(Path::new("tests/sample.wav")).unwrap();
         let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
         let sample_rate = file.spec().sample_rate;
         let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None, None);
         samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
-        println!("max i32: {}", i16::max_value());
+        // println!("max i32: {}", i16::max_value());
         // println!("max val: {}", max_val);
-        println!("max_power: {}", sound.max_power());
-        println!("max sample: {}", samples[0]);
-        assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-        assert!((sound.max_power() - 0.1920468639173821).abs() < 1e-12);
+        // println!("max_power: {}", sound.max_power());
+        // println!("max sample: {}", samples[0]);
+        // println!("max power: {}", sound.max_power());
+        assert!((samples[0] - 0.6503654301602161).abs() < 1e-9);
+        assert!((sound.max_power() - 0.25781895526454907).abs() < 1e-12);
     }
 }
