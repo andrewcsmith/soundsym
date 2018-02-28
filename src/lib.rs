@@ -8,7 +8,9 @@ extern crate sample;
 use voting_experts::{cast_votes, split_string};
 
 use rusty_machine::prelude::*;
-use rusty_machine::learning::gmm::GaussianMixtureModel;
+use rusty_machine::learning::gmm::{CovOption, GaussianMixtureModel};
+use rusty_machine::learning::k_means::KMeansClassifier;
+use rusty_machine::learning::UnSupModel;
 use rusty_machine::data::transforms::{Transformer, Standardizer};
 
 use std::path::Path;
@@ -20,7 +22,7 @@ use std::cmp::PartialOrd;
 use std::i32;
 
 pub const NCOEFFS: usize = 12;
-pub const NCLUSTERS: usize = 8;
+pub const NCLUSTERS: usize = 20;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
@@ -31,9 +33,10 @@ pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_label
 
 pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
     let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
+    gmm.cov_option = CovOption::Regularized(0.1);
     let mut transformer = Standardizer::default();
     let transformed = transformer.transform(data.clone()).unwrap();
-    gmm.set_max_iters(100);
+    gmm.set_max_iters(1000);
     while let Err(err) = gmm.train(&transformed) { 
         println!("Encountered an error in training, retrying: {}", &err.description());
     }
@@ -184,9 +187,21 @@ mod tests {
         let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
         // println!("data: \n{}", &data);
         let predictions = discretize(&data);
-        // println!("predictions: \n{:?}", predictions);
+        println!("predictions: \n{:?}", predictions);
         assert_eq!(predictions.rows(), sound.mfcc_arrays().len());
         assert_eq!(predictions.cols(), NCLUSTERS);
+        assert!(!predictions[[0, 0]].is_nan())
+    }
+
+    #[test]
+    fn test_partitioner() {
+        let path = Path::new("tests/sample.wav");
+        let partitioner = Partitioner::from_path(path).unwrap();
+        let splits = partitioner.partition().unwrap();
+        println!("splits: {:?}", &splits);
+        assert!(splits.len() > 0);
+        let out_path = Path::new("tmp");
+        write_splits(&partitioner.sound, &splits, &out_path);
     }
 
     #[test]
