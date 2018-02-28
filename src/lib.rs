@@ -2,7 +2,7 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate rusty_machine;
-extern crate blas;
+extern crate arrayfire;
 extern crate sample;
 
 use voting_experts::{cast_votes, split_string};
@@ -19,8 +19,6 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-use blas::c::*;
-
 pub const NCOEFFS: usize = 12;
 pub const NCLUSTERS: usize = 8;
 pub const HOP: usize = 512;
@@ -28,6 +26,7 @@ pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
+use sound::max_index;
 pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_labels_to_timestamps};
 
 pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
@@ -35,7 +34,9 @@ pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
     let mut transformer = Standardizer::default();
     let transformed = transformer.transform(data.clone()).unwrap();
     gmm.set_max_iters(100);
-    gmm.train(&transformed).unwrap();
+    while let Err(err) = gmm.train(&transformed) { 
+        println!("Encountered an error in training, retrying: {}", &err.description());
+    }
     gmm.predict(&transformed).unwrap()
 }
 
@@ -94,7 +95,7 @@ impl<'a> Partitioner<'a> {
         // Look up the frame of each element in each cluster, and assign to it that cluster's label.
         // row: &[f64]
         for (idx, row) in predictions.iter_rows().enumerate() {
-            let max_idx: u8 = idamax(row.len() as i32, row, 1) as u8;
+            let max_idx: u8 = max_index(&row[..]) as u8;
             byte_string[idx] = max_idx + start_symbol;
         }
 
