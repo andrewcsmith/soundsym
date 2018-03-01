@@ -9,7 +9,6 @@ use voting_experts::{cast_votes, split_string};
 
 use rusty_machine::prelude::*;
 use rusty_machine::learning::gmm::{CovOption, GaussianMixtureModel};
-use rusty_machine::learning::k_means::KMeansClassifier;
 use rusty_machine::learning::UnSupModel;
 use rusty_machine::data::transforms::{Transformer, Standardizer};
 
