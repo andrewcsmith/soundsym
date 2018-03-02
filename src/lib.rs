@@ -2,8 +2,8 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate rusty_machine;
-extern crate arrayfire;
 extern crate sample;
+extern crate rulinalg;
 
 use voting_experts::{cast_votes, split_string};
 

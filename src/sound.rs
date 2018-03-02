@@ -1,14 +1,8 @@
-extern crate time;
-extern crate hound;
-extern crate num;
-extern crate sample;
-
 use sample::{window, ToSampleSlice, FromSampleSlice};
 
 use vox_box::spectrum::MFCC;
 
-use arrayfire as af;
-use arrayfire::{Array, Dim4};
+use rulinalg::utils;
 
 use std::path::Path;
 use std::error::Error;
@@ -26,21 +20,19 @@ use super::*;
 #[inline]
 pub fn cosine_sim(me: &[f64], you: &[f64]) -> f64 {
     let len = if me.len() < you.len() {
-        me.len() as u64
+        me.len() as usize
     } else {
-        you.len() as u64
+        you.len() as usize
     };
-    af::set_device(0);
-    af::set_backend(af::Backend::CUDA);
-    af::info();
-    let me = Array::new(&me, Dim4::new(&[len, 1, 1, 1]));
-    let you = Array::new(&you, Dim4::new(&[len, 1, 1, 1]));
 
-    let dot = af::dot(&me, &you, af::MatProp::NONE, af::MatProp::NONE);
-    let nrm = af::norm(&me, af::NormType::VECTOR_2, 0.0, 0.0) * af::norm(&you, af::NormType::VECTOR_2, 0.0, 0.0);
-    let mut out = [0f64];
-    dot.host(&mut out[..]);
-    out[0] / nrm
+    let nrm = norm(me) * norm(you);
+    let dot = utils::dot(&me[..len], &you[..len]);
+    dot / nrm
+}
+
+#[inline]
+fn norm(me: &[f64]) -> f64 {
+    me.iter().fold(0., |memo, item| item * item + memo)
 }
 
 /// Similar to the above, but does not calculate the norm of `you`. Suitable for comparing/ranking
@@ -51,20 +43,14 @@ pub fn cosine_sim_const_you(me: &[f64], you: &[f64]) -> Result<f64, CosError<'st
     let len = if me.len() != you.len() {
         return Err(CosError("Vectors for cosine_sim must be same length"))
     } else {
-        me.len() as u64
+        me.len() as usize
     };
 
-    let me = Array::new(&me, Dim4::new(&[len, 1, 1, 1]));
-    let you = Array::new(&you, Dim4::new(&[len, 1, 1, 1]));
-
-    let dot = af::dot(&me, &you, af::MatProp::NONE, af::MatProp::NONE);
-    let nrm = af::norm(&me, af::NormType::VECTOR_2, 0.0, 0.0) * af::norm(&you, af::NormType::VECTOR_2, 0.0, 0.0);
+    let nrm = norm(you) * norm(me);
     if nrm == 0f64 {
         Err(CosError("Norm equals zero"))
     } else {
-        let mut out = [0f64];
-        (dot / nrm).host(&mut out[..]);
-        Ok(out[0])
+        Ok(utils::dot(&me[..len], &you[..len]) / nrm)
     }
 }
 
