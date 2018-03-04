@@ -2,14 +2,14 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate rusty_machine;
-extern crate blas;
 extern crate sample;
-extern crate rayon;
+extern crate rulinalg;
 
 use voting_experts::{cast_votes, split_string};
 use rusty_machine::prelude::*;
-use rusty_machine::learning::k_means::{KPlusPlus, KMeansClassifier};
-use rusty_machine::data::transforms::{Standardizer, Transformer};
+use rusty_machine::learning::gmm::{CovOption, GaussianMixtureModel};
+use rusty_machine::learning::UnSupModel;
+use rusty_machine::data::transforms::{Transformer, Standardizer};
 
 use std::path::Path;
 use std::error::Error;
@@ -19,16 +19,45 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-use blas::c::*;
-
-pub const NCOEFFS: usize = 14;
-pub const NCLUSTERS: usize = 30;
-pub const HOP: usize = 256;
-pub const BIN: usize = 4096;
-pub const PREEMPHASIS: f64 = 75f64;
+pub const NCOEFFS: usize = 12;
+pub const NCLUSTERS: usize = 20;
+pub const HOP: usize = 512;
+pub const BIN: usize = 2048;
+pub const PREEMPHASIS: f64 = 150f64;
 
 mod sound;
+use sound::max_index;
 pub use sound::{Sound, SoundDictionary, SoundSequence, Timestamp, audacity_labels_to_timestamps};
+
+pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
+    let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
+    gmm.cov_option = CovOption::Regularized(0.1);
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data.clone()).unwrap();
+    gmm.set_max_iters(1000);
+    while let Err(err) = gmm.train(&transformed) { 
+        println!("Encountered an error in training, retrying: {}", &err.description());
+    }
+    gmm.predict(&transformed).unwrap()
+}
+
+pub fn train_model(data: Matrix<f64>) -> GaussianMixtureModel {
+    let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
+    gmm.cov_option = CovOption::Regularized(0.1);
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data).unwrap();
+    gmm.set_max_iters(100);
+    while let Err(err) = gmm.train(&transformed) { 
+        println!("Encountered an error in training, retrying: {}", &err.description());
+    }
+    gmm
+}
+
+pub fn discretize_with_model(data: Matrix<f64>, gmm: &GaussianMixtureModel) -> Matrix<f64> {
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data).unwrap();
+    gmm.predict(&transformed).unwrap()
+}
 
 /// Partitions a sound file (from a path) into individual phonemes. It is possible to set the
 /// depth of the trie and the threshold of votes needed to draw a boundary line. 
@@ -39,7 +68,7 @@ pub struct Partitioner<'a> {
     pub sound: Cow<'a, Sound>,
     pub depth: usize,
     pub threshold: usize,
-    pub model: KMeansClassifier<KPlusPlus>,
+    pub model: Option<GaussianMixtureModel>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -50,7 +79,7 @@ impl<'a> Partitioner<'a> {
             sound: sound,
             depth: 5,
             threshold: 4,
-            model: model,
+            model: None,
         }
     }
 
@@ -75,52 +104,45 @@ impl<'a> Partitioner<'a> {
         let cols = NCOEFFS;
         let rows = self.sound.mfccs().len() / NCOEFFS;
         let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
-        // println!("##DATA \n{}", &data);
-        let mut transformer = Standardizer::default();
-        let data = transformer.transform(data.clone()).unwrap();
-
-        // Retry forever.
-        while let Err(e) = self.model.train(&data) {
-            println!("Error: {}", e);
-            // Use the following if training a GaussianMixtureModel
-            // model.cov_option.reg_covar += 0.01;
-            // println!("New reg_covar is {}", model.cov_option.reg_covar);
-        }
-
+        self.model = Some(train_model(data));
         Ok(())
-    }
-
-    pub fn predict(&self, data: &Matrix<f64>) -> Result<Matrix<f64>, Box<Error>> {
-        let cols = self.model.predict(&data).unwrap();
-        let mut out = Matrix::zeros(data.rows(), NCLUSTERS);
-        for (row, col) in out.iter_rows_mut().zip(cols.iter()) {
-            row[*col] = 1.;
-        }
-        Ok(out)
     }
 
     /// Executes the partition. On success, returns a tuple containing the path of the file
     /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
     /// the phoneme.
-    pub fn partition(&self, predictions: Matrix<f64>) -> Result<Vec<usize>, Box<Error>> {
-        // println!("##PREDICTIONS \n{}", &predictions);
-        // Symbol to start the gibberish from
-        let start_symbol = 'A' as u8;
-        // Initialize memory for a u8 vector with one element per mfcc frame
-        let mut byte_string = vec![0u8; predictions.rows()];
-        // Look up the frame of each element in each cluster, and assign to it that cluster's label.
-        // row: &[f64]
-        for (idx, row) in predictions.iter_rows().enumerate() {
-            let max_idx: u8 = idamax(row.len() as i32, row, 1) as u8;
-            byte_string[idx] = max_idx + start_symbol;
-        }
+    pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
+        let cols = NCOEFFS;
+        let rows = self.sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
+        match self.model {
+            Some(ref model) => {
+                // println!("##DATA \n{}", &data);
+                let predictions = discretize_with_model(data, model);
 
-        let text_string = try!(from_utf8(&byte_string[..]));
-        println!("{}", &text_string);
-        let votes = cast_votes(&text_string, self.depth);
-        let splits = split_string(&text_string, &votes, self.depth, self.threshold);
-        let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
-        Ok(segment_lengths)
+                // println!("##PREDICTIONS \n{}", &predictions);
+                // Symbol to start the gibberish from
+                let start_symbol = 'A' as u8;
+                // Initialize memory for a u8 vector with one element per mfcc frame
+                let mut byte_string = vec![0u8; rows];
+                // Look up the frame of each element in each cluster, and assign to it that cluster's label.
+                // row: &[f64]
+                for (idx, row) in predictions.iter_rows().enumerate() {
+                    let max_idx: u8 = max_index(&row[..]) as u8;
+                    byte_string[idx] = max_idx + start_symbol;
+                }
+
+                let text_string = try!(from_utf8(&byte_string[..]));
+                // println!("{}", &text_string);
+                let votes = cast_votes(&text_string, self.depth);
+                let splits = split_string(&text_string, &votes, self.depth, self.threshold);
+                let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
+                Ok(segment_lengths)
+            }
+            None => {
+                Err(Box::new(CosError("Must first train model")))
+            }
+        }
     }
 }
 
@@ -192,17 +214,44 @@ mod tests {
     use std::cmp::Ordering;
 
     #[test]
+    fn test_discretize() {
+        let path = Path::new("tests/sample.wav");
+        let sound = Sound::from_path(path).unwrap();
+        let cols = NCOEFFS;
+        let rows = sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
+        // println!("data: \n{}", &data);
+        let predictions = discretize(&data);
+        println!("predictions: \n{:?}", predictions);
+        assert_eq!(predictions.rows(), sound.mfcc_arrays().len());
+        assert_eq!(predictions.cols(), NCLUSTERS);
+        assert!(!predictions[[0, 0]].is_nan())
+    }
+
+    #[test]
+    fn test_partitioner() {
+        let path = Path::new("tests/sample.wav");
+        let partitioner = Partitioner::from_path(path).unwrap();
+        let splits = partitioner.partition().unwrap();
+        println!("splits: {:?}", &splits);
+        assert!(splits.len() > 0);
+        let out_path = Path::new("tmp");
+        write_splits(&partitioner.sound, &splits, &out_path);
+    }
+
+    #[test]
     fn test_sound_from_samples() {
-        let mut file = hound::WavReader::open(Path::new("data/sample.wav")).unwrap();
+        let mut file = hound::WavReader::open(Path::new("tests/sample.wav")).unwrap();
         let mut samples: Vec<f64> = file.samples::<i32>().map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(8) as f64).collect();
         let sample_rate = file.spec().sample_rate;
         let sound = Sound::from_samples(samples.clone(), sample_rate as f64, None, None);
         samples.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(Ordering::Equal));
-        println!("max i32: {}", i16::max_value());
+        // println!("max i32: {}", i16::max_value());
         // println!("max val: {}", max_val);
-        println!("max_power: {}", sound.max_power());
-        println!("max sample: {}", samples[0]);
-        assert!((samples[0] - 0.5961925502).abs() < 1e-9);
-        assert!((sound.max_power() - 0.18730848034829456).abs() < 1e-12);
+        // println!("max_power: {}", sound.max_power());
+        // println!("max sample: {}", samples[0]);
+        // println!("max power: {}", sound.max_power());
+        assert!((samples[0] - 0.6503654301602161).abs() < 1e-9);
+        assert!((sound.max_power() - 0.25781895526454907).abs() < 1e-12);
     }
 }

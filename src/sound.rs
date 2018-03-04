@@ -1,17 +1,11 @@
-extern crate time;
-extern crate hound;
-extern crate num;
-extern crate sample;
-
-use sample::{window, ToSampleSlice, FromSampleSlice, ToFrameSlice};
+use sample::{window, ToSampleSlice, FromSampleSlice};
 
 use vox_box::spectrum::MFCC;
 use vox_box::waves::MaxAmplitude;
 use vox_box::periodic::Pitched;
 use sound::num::Float;
 
-use blas::c::*;
-use rayon::prelude::*;
+use rulinalg::utils;
 
 use std::path::Path;
 use std::error::Error;
@@ -29,13 +23,19 @@ use super::*;
 #[inline]
 pub fn cosine_sim(me: &[f64], you: &[f64]) -> f64 {
     let len = if me.len() < you.len() {
-        me.len() as i32
+        me.len() as usize
     } else {
-        you.len() as i32
+        you.len() as usize
     };
-    let dot = ddot(len, me, 1, you, 1);
-    let nrm = dnrm2(len, me, 1) * dnrm2(len, you, 1);
+
+    let nrm = norm(me) * norm(you);
+    let dot = utils::dot(&me[..len], &you[..len]);
     dot / nrm
+}
+
+#[inline]
+fn norm(me: &[f64]) -> f64 {
+    me.iter().fold(0., |memo, item| item * item + memo)
 }
 
 /// Similar to the above, but does not calculate the norm of `you`. Suitable for comparing/ranking
@@ -43,15 +43,17 @@ pub fn cosine_sim(me: &[f64], you: &[f64]) -> f64 {
 #[inline]
 #[allow(unused)]
 pub fn cosine_sim_const_you(me: &[f64], you: &[f64]) -> Result<f64, CosError<'static>> {
-    if me.len() != you.len() {
+    let len = if me.len() != you.len() {
         return Err(CosError("Vectors for cosine_sim must be same length"))
-    }
-    let dot = ddot(me.len() as i32, &me, 1, &you, 1);
-    let nrm = dnrm2(me.len() as i32, &me, 1);
+    } else {
+        me.len() as usize
+    };
+
+    let nrm = norm(you) * norm(me);
     if nrm == 0f64 {
         Err(CosError("Norm equals zero"))
     } else {
-        Ok(dot / nrm)
+        Ok(utils::dot(&me[..len], &you[..len]) / nrm)
     }
 }
 
@@ -343,10 +345,10 @@ impl SoundDictionary {
     /// Finds the Sound closest to a particular distance away from a given Sound.
     pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<Arc<Sound>> {
         let distances: Vec<f64> = self.sounds.iter()
-            .map(|s| cosine_sim_const_you(s.mean_mfccs(), other.mean_mfccs()).unwrap())
-            .map(|v| v - distance).collect();
-        let max_idx = idamax(distances.len() as i32, &distances[..], 1);
-        Some(self.sounds[max_idx as usize].clone())
+            .map(|s| cosine_sim_angular(s.mean_mfccs(), other.mean_mfccs()))
+            .map(|v| (v - distance).abs()).collect();
+        let min_idx = min_index(&distances[..]);
+        Some(self.sounds[min_idx as usize].clone())
     }
 }
 
@@ -472,6 +474,28 @@ impl SoundSequence {
     }
 }
 
+pub fn max_index(vals: &[f64]) -> usize {
+    vals.iter().enumerate()
+        .fold((0usize, 0f64), |(max_idx, max_dist), (idx, dist)| {
+            if *dist > max_dist {
+                (idx, *dist)
+            } else {
+                (max_idx, max_dist)
+            }
+        }).0
+}
+
+pub fn min_index(vals: &[f64]) -> usize {
+    vals.iter().enumerate()
+        .fold((0usize, 1f64), |(min_idx, min_dist), (idx, dist)| {
+            if *dist < min_dist {
+                (idx, *dist)
+            } else {
+                (min_idx, min_dist)
+            }
+        }).0
+}
+
 pub struct Timestamp(f64, f64, Option<String>); 
 
 #[allow(unused)]
@@ -564,8 +588,8 @@ mod tests {
 
     #[test]
     fn test_angular_distance() {
-        // let mfccs = [0.1, 0.4, 0.2, 0.8, 0., 0., 0., 0., 0., 0., 0., 0.];
-        // assert_eq!(cosine_sim_angular(&mfccs, &mfccs), 0.0);
+        let mfccs = [0.1, 0.4, 0.2, 0.8, 0., 0., 0., 0., 0., 0., 0., 0.];
+        assert_eq!(cosine_sim_angular(&mfccs, &mfccs), 0.0);
     }
 
     #[test]

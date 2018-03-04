@@ -38,13 +38,7 @@ fn main() {
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
 
     partitioner.train().unwrap();
-    let cols = NCOEFFS;
-    let rows = partitioner.sound.mfccs().len() / NCOEFFS;
-
-    let data: Matrix<f64> = Matrix::new(rows, cols, partitioner.sound.mfccs().to_owned());
-    let predictions = partitioner.predict(&data).unwrap();
-    let splits = partitioner.partition(predictions).unwrap();
-
+    let splits = partitioner.partition().unwrap();
 
     let mut input = hound::WavReader::open(&path).expect("Could not open input file");
     let spec = input.spec();
@@ -58,7 +52,7 @@ fn main() {
         Sound::from_samples(sound_samples, sample_rate as f64, None, None)
     }).collect();
 
-    sounds.sort_by(|a, b| a.max_power().partial_cmp(&b.max_power()).unwrap_or(Ordering::Equal));
+    sounds.sort_by(|a, b| a.max_power().abs().partial_cmp(&b.max_power().abs()).unwrap_or(Ordering::Less));
 
     let mut output = hound::WavWriter::create(&Path::new(&output_path), spec).unwrap();
     for sound in sounds {
