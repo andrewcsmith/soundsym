@@ -27,12 +27,13 @@ fn main() {
 
     let path = Path::new(&input_file);
 
-    let splits = Partitioner::from_path(&path).unwrap()
+    let mut partitioner = Partitioner::from_path(&path).unwrap()
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")
-               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4))
-        .partition().unwrap();
+               .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
+    partitioner.train().unwrap();
+    let splits = partitioner.partition().unwrap();
 
     let mut input = hound::WavReader::open(&path).expect("Could not open input file");
     let spec = input.spec();
@@ -46,7 +47,7 @@ fn main() {
         Sound::from_samples(sound_samples, sample_rate as f64, None, None)
     }).collect();
 
-    sounds.sort_by(|a, b| a.max_power().partial_cmp(&b.max_power()).unwrap_or(Ordering::Equal));
+    sounds.sort_by(|a, b| a.max_power().abs().partial_cmp(&b.max_power().abs()).unwrap_or(Ordering::Less));
 
     let mut output = hound::WavWriter::create(&Path::new(&output_path), spec).unwrap();
     for sound in sounds {

@@ -42,6 +42,24 @@ pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
     gmm.predict(&transformed).unwrap()
 }
 
+pub fn train_model(data: Matrix<f64>) -> GaussianMixtureModel {
+    let mut gmm = GaussianMixtureModel::new(NCLUSTERS);
+    gmm.cov_option = CovOption::Regularized(0.1);
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data).unwrap();
+    gmm.set_max_iters(100);
+    while let Err(err) = gmm.train(&transformed) { 
+        println!("Encountered an error in training, retrying: {}", &err.description());
+    }
+    gmm
+}
+
+pub fn discretize_with_model(data: Matrix<f64>, gmm: &GaussianMixtureModel) -> Matrix<f64> {
+    let mut transformer = Standardizer::default();
+    let transformed = transformer.transform(data).unwrap();
+    gmm.predict(&transformed).unwrap()
+}
+
 /// Partitions a sound file (from a path) into individual phonemes. It is possible to set the
 /// depth of the trie and the threshold of votes needed to draw a boundary line. 
 ///
@@ -50,7 +68,8 @@ pub fn discretize(data: &Matrix<f64>) -> Matrix<f64> {
 pub struct Partitioner<'a> {
     pub sound: Cow<'a, Sound>,
     pub depth: usize,
-    pub threshold: usize
+    pub threshold: usize,
+    pub model: Option<GaussianMixtureModel>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -58,7 +77,8 @@ impl<'a> Partitioner<'a> {
         Partitioner {
             sound: sound,
             depth: 5,
-            threshold: 4
+            threshold: 4,
+            model: None,
         }
     }
 
@@ -79,6 +99,14 @@ impl<'a> Partitioner<'a> {
         self
     }
 
+    pub fn train(&mut self) -> Result<(), Box<Error>> {
+        let cols = NCOEFFS;
+        let rows = self.sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
+        self.model = Some(train_model(data));
+        Ok(())
+    }
+
     /// Executes the partition. On success, returns a tuple containing the path of the file
     /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
     /// the phoneme.
@@ -86,27 +114,34 @@ impl<'a> Partitioner<'a> {
         let cols = NCOEFFS;
         let rows = self.sound.mfccs().len() / NCOEFFS;
         let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
-        // println!("##DATA \n{}", &data);
-        let predictions = discretize(&data);
+        match self.model {
+            Some(ref model) => {
+                // println!("##DATA \n{}", &data);
+                let predictions = discretize_with_model(data, model);
 
-        // println!("##PREDICTIONS \n{}", &predictions);
-        // Symbol to start the gibberish from
-        let start_symbol = 'A' as u8;
-        // Initialize memory for a u8 vector with one element per mfcc frame
-        let mut byte_string = vec![0u8; rows];
-        // Look up the frame of each element in each cluster, and assign to it that cluster's label.
-        // row: &[f64]
-        for (idx, row) in predictions.iter_rows().enumerate() {
-            let max_idx: u8 = max_index(&row[..]) as u8;
-            byte_string[idx] = max_idx + start_symbol;
+                // println!("##PREDICTIONS \n{}", &predictions);
+                // Symbol to start the gibberish from
+                let start_symbol = 'A' as u8;
+                // Initialize memory for a u8 vector with one element per mfcc frame
+                let mut byte_string = vec![0u8; rows];
+                // Look up the frame of each element in each cluster, and assign to it that cluster's label.
+                // row: &[f64]
+                for (idx, row) in predictions.iter_rows().enumerate() {
+                    let max_idx: u8 = max_index(&row[..]) as u8;
+                    byte_string[idx] = max_idx + start_symbol;
+                }
+
+                let text_string = try!(from_utf8(&byte_string[..]));
+                // println!("{}", &text_string);
+                let votes = cast_votes(&text_string, self.depth);
+                let splits = split_string(&text_string, &votes, self.depth, self.threshold);
+                let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
+                Ok(segment_lengths)
+            }
+            None => {
+                Err(Box::new(CosError("Must first train model")))
+            }
         }
-
-        let text_string = try!(from_utf8(&byte_string[..]));
-        // println!("{}", &text_string);
-        let votes = cast_votes(&text_string, self.depth);
-        let splits = split_string(&text_string, &votes, self.depth, self.threshold);
-        let segment_lengths = splits.into_iter().map(|s| s.len() * HOP).collect();
-        Ok(segment_lengths)
     }
 }
 

@@ -59,11 +59,12 @@ fn main() {
     println!("time to initialize sound: {}", new_time - current_time);
     current_time = new_time;
 
-    let partitioner = Partitioner::new(Cow::Owned(sound))
+    let mut partitioner = Partitioner::new(Cow::Owned(sound))
         .threshold(matches.opt_str("t")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(3))
         .depth(matches.opt_str("d")
                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(4));
+    partitioner.train();
     let splits = partitioner.partition().unwrap();
 
     new_time = time::get_time();
