@@ -313,10 +313,10 @@ impl SoundDictionary {
     /// Finds the Sound closest to a particular distance away from a given Sound.
     pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<Arc<Sound>> {
         let distances: Vec<f64> = self.sounds.iter()
-            .map(|s| cosine_sim_const_you(s.mean_mfccs(), other.mean_mfccs()).unwrap())
-            .map(|v| v - distance).collect();
-        let max_idx = max_index(&distances[..]);
-        Some(self.sounds[max_idx as usize].clone())
+            .map(|s| cosine_sim_angular(s.mean_mfccs(), other.mean_mfccs()))
+            .map(|v| (v - distance).abs()).collect();
+        let min_idx = min_index(&distances[..]);
+        Some(self.sounds[min_idx as usize].clone())
     }
 }
 
@@ -449,6 +449,17 @@ pub fn max_index(vals: &[f64]) -> usize {
                 (idx, *dist)
             } else {
                 (max_idx, max_dist)
+            }
+        }).0
+}
+
+pub fn min_index(vals: &[f64]) -> usize {
+    vals.iter().enumerate()
+        .fold((0usize, 1f64), |(min_idx, min_dist), (idx, dist)| {
+            if *dist < min_dist {
+                (idx, *dist)
+            } else {
+                (min_idx, min_dist)
             }
         }).0
 }
