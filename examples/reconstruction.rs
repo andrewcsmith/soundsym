@@ -2,7 +2,6 @@
 /// could conceivably be the final result.
 
 extern crate soundsym;
-extern crate hound;
 extern crate getopts;
 
 use std::error::Error;
@@ -18,7 +17,7 @@ use soundsym::*;
 fn main() {
     match go() {
         Ok(_) => { }
-        Err(e) => { println!("Error: {}", e.description()); std::process::exit(1); }
+        Err(e) => { println!("Error: {}\nBacktrace: {:?}", e.description(), e.cause()); std::process::exit(1); }
     }
 }
 
@@ -26,25 +25,48 @@ fn go() -> Result<(), Box<Error>> {
     let args: Vec<String> = env::args().collect();
     let mut opts = Options::new();
     opts.reqopt("s", "", "set source file", "SOURCE");
+    opts.optopt("d", "", "set dictionary path", "DICTIONARY");
     opts.reqopt("t", "", "set target file", "TARGET");
     opts.reqopt("o", "", "set output path", "OUT");
+    opts.optopt("f", "", "set output folder", "FOLDER");
 
     let matches = opts.parse(&args[1..])?;
 
     let input_file = matches.opt_str("s").unwrap();
     let target_file = matches.opt_str("t").unwrap();
     let output_file = matches.opt_str("o").unwrap();
+    let dictionary_path = matches.opt_str("d");
+    let output_folder = matches.opt_str("f");
 
     let input_path = Path::new(&input_file);
+    println!("Loading partitioner");
     let mut partitioner = Partitioner::from_path(&input_path)?
         .threshold(4)
-        .depth(4);
+        .depth(3);
+
     println!("Loaded partitioner");
     partitioner.train()?;
     println!("Trained partitioner");
     let splits = partitioner.partition()?;
 
-    let dictionary = SoundDictionary::from_segments(&partitioner.sound, &splits[..]);
+    let dictionary = match dictionary_path {
+        Some(ref path) => {
+            SoundDictionary::from_path(&Path::new(path))?
+        }
+        None => {
+            SoundDictionary::from_segments(&partitioner.sound, &splits[..])
+        }
+    };
+
+    match output_folder {
+        Some(folder) => {
+            let path = Path::new(&folder);
+            if path.exists() {
+                write_splits(&partitioner.sound, &splits[..], &path)?;
+            }
+        }
+        None => { }
+    }
 
     let target_sound = Sound::from_path(&Path::new(&target_file))?;
     partitioner.sound = Cow::Owned(target_sound);
