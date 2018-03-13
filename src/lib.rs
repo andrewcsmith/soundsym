@@ -19,8 +19,8 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-pub const NCOEFFS: usize = 12;
-pub const NCLUSTERS: usize = 20;
+pub const NCOEFFS: usize = 16;
+pub const NCLUSTERS: usize = 26;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;
 pub const PREEMPHASIS: f64 = 150f64;
@@ -46,7 +46,7 @@ pub fn train_model(data: Matrix<f64>) -> GaussianMixtureModel {
     gmm.cov_option = CovOption::Regularized(0.1);
     let mut transformer = Standardizer::default();
     let transformed = transformer.transform(data).unwrap();
-    gmm.set_max_iters(100);
+    gmm.set_max_iters(1000);
     while let Err(err) = gmm.train(&transformed) { 
         println!("Encountered an error in training, retrying: {}", &err.description());
     }
@@ -73,8 +73,6 @@ pub struct Partitioner<'a> {
 
 impl<'a> Partitioner<'a> {
     pub fn new(sound: Cow<'a, Sound>) -> Self {
-        let mut model = KMeansClassifier::new(NCLUSTERS);
-        model.set_iters(50);
         Partitioner {
             sound: sound,
             depth: 5,
@@ -117,7 +115,7 @@ impl<'a> Partitioner<'a> {
         let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
         match self.model {
             Some(ref model) => {
-                // println!("##DATA \n{}", &data);
+
                 let predictions = discretize_with_model(data, model);
 
                 // println!("##PREDICTIONS \n{}", &predictions);

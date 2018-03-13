@@ -1,9 +1,8 @@
-use sample::{window, ToSampleSlice, FromSampleSlice};
+use sample::{window, ToSampleSlice, FromSampleSlice, ToFrameSlice};
 
 use vox_box::spectrum::MFCC;
 use vox_box::waves::MaxAmplitude;
-use vox_box::periodic::Pitched;
-use sound::num::Float;
+use vox_box::periodic::{Pitched, Hanning};
 
 use rulinalg::utils;
 
@@ -49,7 +48,7 @@ pub fn cosine_sim_const_you(me: &[f64], you: &[f64]) -> Result<f64, CosError<'st
         me.len() as usize
     };
 
-    let nrm = norm(you) * norm(me);
+    let nrm = norm(me);
     if nrm == 0f64 {
         Err(CosError("Norm equals zero"))
     } else {
@@ -91,9 +90,13 @@ impl fmt::Display for Sound {
 impl Sound {
     /// Generate a Sound from a Vec of f64 samples. Calculates max_power and mfccs.
     pub fn from_samples(samples: Vec<f64>, sample_rate: f64, mfccs: Option<Vec<f64>>, name: Option<String>) -> Sound {
+        // println!("mfccs analyzing");
         let mfccs: Vec<f64> = mfccs.unwrap_or(analyze_mfccs(sample_rate, &samples[..]));
+        // println!("mfccs analyzed");
         let max_power = analyze_max_power(&samples[..]);
+        // println!("max power analyzed");
         let mean_mfccs = analyze_mean_mfccs(&mfccs[..]);
+        // println!("mean mfccs analyzed");
 
         let sound = Sound { 
             max_power: max_power,
@@ -225,7 +228,7 @@ fn analyze_mfccs(sample_rate: f64, samples: &[f64]) -> Vec<f64> {
     window::Windower::hanning(
         <&[[f64; 1]]>::from_sample_slice(samples).unwrap(), BIN, HOP)
         .map(|frame| {
-            for s in frame {
+            for s in frame.take(BIN) {
                 frame_buffer.extend_from_slice(<&[f64]>::to_sample_slice(&s[..]));
             }
             let mfccs = mfcc_calc(&frame_buffer[..]);
@@ -243,7 +246,7 @@ fn analyze_max_power(samples: &[f64]) -> f64 {
         <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), BIN, HOP)
         .map(|frame| {
             let mut count: usize = 0;
-            (frame.fold(0., |acc, s| {
+            (frame.take(BIN).fold(0., |acc, s| {
                 let sample_slice: &[f64] = <&[f64]>::to_sample_slice(&s[..]);
                 count += 1;
                 acc + sample_slice[0].powi(2)
@@ -258,8 +261,8 @@ fn analyze_pitch_confidence(samples: &[f64]) -> f64 {
     let frame_slice: &[[f64; 1]] = &samples[..].to_frame_slice().unwrap();
     window::Windower::hanning(frame_slice, 2048, 1024).map(|chunk| {
         let chunk_data: Vec<[f64; 1]> = chunk.collect();
-        chunk_data.to_sample_slice().pitch::<window::Hanning>(44100., 0.2, 0.05, maxima, maxima, 0.01, 100., 500.)
-    }).fold(0., |acc, x| x[0].strength.max(acc))
+        chunk_data.to_sample_slice().pitch::<Hanning>(44100., 0.2, maxima, maxima, 100., 500.)
+    }).fold(0f64, |acc, x| (x[0].strength as f64).max(acc))
 }
 
 fn analyze_mean_mfccs(mfccs: &[f64]) -> [f64; NCOEFFS] {
@@ -322,33 +325,45 @@ impl SoundDictionary {
 
     /// Adds segments from a given Sound into the dictionary
     pub fn add_segments(&mut self, sound: &Sound, segments: &[usize]) {
-        let mut new_sounds: Vec<Arc<Sound>> = Vec::with_capacity(segments.len());
         let mut samples = sound.samples().iter();
         let mut mfccs = sound.mfccs().iter();
-        segments.iter().map(|seg| {
+        let new_sounds: Vec<Arc<Sound>> = segments.iter().map(|seg| {
             let samp: Vec<f64> = samples.by_ref().take(*seg).map(|s| *s).collect();
             let mfccs: Vec<f64> = mfccs.by_ref().take(*seg / HOP * NCOEFFS).map(|s| *s).collect();
             (samp, mfccs)
-        }).collect::<Vec<(Vec<f64>, Vec<f64>)>>().into_par_iter().map(|(samp, mfccs)| {
+        }).map(|(samp, mfccs)| {
             let mut sound = Sound::from_samples(samp, sound.sample_rate(), Some(mfccs), None);
-            sound.preload_pitch_confidence();
+            // sound.preload_pitch_confidence();
             Arc::new(sound)
-        }).collect_into(&mut new_sounds);
+        }).collect();
         self.sounds.extend(new_sounds);
     }
 
     /// Finds the most similar Sound in the SoundDictionary to `other`
     pub fn match_sound(&self, other: &Sound) -> Option<Arc<Sound>> {
-        self.at_distance(0., other)
+        self.at_distance(1., other)
     }
 
     /// Finds the Sound closest to a particular distance away from a given Sound.
     pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<Arc<Sound>> {
-        let distances: Vec<f64> = self.sounds.iter()
-            .map(|s| cosine_sim_angular(s.mean_mfccs(), other.mean_mfccs()))
-            .map(|v| (v - distance).abs()).collect();
-        let min_idx = min_index(&distances[..]);
-        Some(self.sounds[min_idx as usize].clone())
+        let (min_idx, min_distance) = self.sounds.iter()
+            .map(|s| {
+                let sim = cosine_sim(s.mean_mfccs(), other.mean_mfccs());
+                // println!("\n\nMean 1: {:?}\nMean 2: {:?}", s.mean_mfccs(), other.mean_mfccs());
+                // println!("Sim: {}", sim);
+                sim
+            })
+            .map(|v| (v - distance).abs())
+            .enumerate()
+            .fold((0usize, 1f64), |(mut min_idx, mut min_distance), (idx, distance)| {
+                if distance < min_distance { 
+                    min_idx = idx;
+                    min_distance = distance;
+                }
+                (min_idx, min_distance)
+            });
+        println!("idx: {:04}\tdist: {:0.3}", min_idx, min_distance);
+        Some(self.sounds[min_idx].clone())
     }
 }
 
@@ -358,15 +373,6 @@ pub struct SoundSequence {
     sounds: Vec<Arc<Sound>>,
     distances: Vec<f64>
 }
-
-// impl<'a> IntoIterator for SoundSequence<'a> {
-//     type Item = Arc<Sound>;
-//     type IntoIter = ::std::vec::IntoIter<Arc<Sound>>;
-//
-//     fn into_iter(self) -> Self::IntoIter {
-//         self.sounds.into_iter()
-//     }
-// }
 
 impl fmt::Display for SoundSequence {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
