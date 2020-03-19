@@ -9,7 +9,7 @@ use rulinalg::utils;
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
-use std::{f64, i32};
+use std::{f32, f64, i32};
 use std::sync::Arc;
 use std::fs::File;
 use std::io;
@@ -348,21 +348,21 @@ impl SoundDictionary {
     pub fn at_distance(&self, distance: f64, other: &Sound) -> Option<Arc<Sound>> {
         let (min_idx, min_distance) = self.sounds.iter()
             .map(|s| {
-                let sim = cosine_sim(s.mean_mfccs(), other.mean_mfccs());
+                let sim = cosine_sim(s.mfccs(), other.mfccs());
                 // println!("\n\nMean 1: {:?}\nMean 2: {:?}", s.mean_mfccs(), other.mean_mfccs());
                 // println!("Sim: {}", sim);
                 sim
             })
             .map(|v| (v - distance).abs())
             .enumerate()
-            .fold((0usize, 1f64), |(mut min_idx, mut min_distance), (idx, distance)| {
+            .fold((0usize, 2f64), |(mut min_idx, mut min_distance), (idx, distance)| {
                 if distance < min_distance { 
                     min_idx = idx;
                     min_distance = distance;
                 }
                 (min_idx, min_distance)
             });
-        println!("idx: {:04}\tdist: {:0.3}", min_idx, min_distance);
+        // println!("idx: {:04}\tdist: {:0.3}", min_idx, min_distance);
         Some(self.sounds[min_idx].clone())
     }
 }

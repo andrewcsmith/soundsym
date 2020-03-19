@@ -19,7 +19,7 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-pub const NCOEFFS: usize = 16;
+pub const NCOEFFS: usize = 14;
 pub const NCLUSTERS: usize = 26;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;
@@ -46,7 +46,7 @@ pub fn train_model(data: Matrix<f64>) -> GaussianMixtureModel {
     gmm.cov_option = CovOption::Regularized(0.1);
     let mut transformer = Standardizer::default();
     let transformed = transformer.transform(data).unwrap();
-    gmm.set_max_iters(1000);
+    gmm.set_max_iters(5);
     while let Err(err) = gmm.train(&transformed) { 
         println!("Encountered an error in training, retrying: {}", &err.description());
     }
@@ -109,10 +109,10 @@ impl<'a> Partitioner<'a> {
     /// Executes the partition. On success, returns a tuple containing the path of the file
     /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
     /// the phoneme.
-    pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
+    pub fn partition_other(&self, sound: &Sound) -> Result<Vec<usize>, Box<Error>> {
         let cols = NCOEFFS;
-        let rows = self.sound.mfccs().len() / NCOEFFS;
-        let data: Matrix<f64> = Matrix::new(rows, cols, self.sound.mfccs().to_owned());
+        let rows = sound.mfccs().len() / NCOEFFS;
+        let data: Matrix<f64> = Matrix::new(rows, cols, sound.mfccs().to_owned());
         match self.model {
             Some(ref model) => {
 
@@ -141,6 +141,12 @@ impl<'a> Partitioner<'a> {
                 Err(Box::new(CosError("Must first train model")))
             }
         }
+    }
+    /// Executes the partition. On success, returns a tuple containing the path of the file
+    /// partitioned and a Vec of sample indices where each index corresponds to the beginning of
+    /// the phoneme.
+    pub fn partition(&self) -> Result<Vec<usize>, Box<Error>> {
+        self.partition_other(&self.sound)
     }
 }
 
