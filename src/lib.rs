@@ -19,7 +19,7 @@ use std::str::from_utf8;
 use std::cmp::PartialOrd;
 use std::i32;
 
-pub const NCOEFFS: usize = 14;
+pub const NCOEFFS: usize = 12;
 pub const NCLUSTERS: usize = 26;
 pub const HOP: usize = 512;
 pub const BIN: usize = 2048;

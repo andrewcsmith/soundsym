@@ -72,8 +72,8 @@ fn main() {
     let rows = partitioner.sound.mfccs().len() / NCOEFFS;
 
     let data: Matrix<f64> = Matrix::new(rows, cols, partitioner.sound.mfccs().to_owned());
-    let predictions = partitioner.predict(&data).unwrap();
-    let splits = partitioner.partition(predictions).unwrap();
+    let predictions = partitioner.train().unwrap();
+    let splits = partitioner.partition().unwrap();
 
     new_time = time::get_time();
     println!("time to partition: {}", new_time - current_time);
