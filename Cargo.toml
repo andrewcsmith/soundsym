@@ -6,7 +6,7 @@ authors = ["Andrew Smith <andrewchristophersmith@gmail.com>"]
 [dependencies]
 voting_experts = { git = "https://github.com/andrewcsmith/voting_experts.git" }
 sample = "0.9.1"
-vox_box = { path = "../vox_box" }
+vox_box = { git = "https://github.com/andrewcsmith/vox_box.rs" }
 hound = "2.0"
 getopts = "0.2"
 num = "*"
