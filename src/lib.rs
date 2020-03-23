@@ -21,9 +21,9 @@ use std::i32;
 
 pub const NCOEFFS: usize = 12;
 pub const NCLUSTERS: usize = 26;
-pub const HOP: usize = 512;
-pub const BIN: usize = 2048;
-pub const PREEMPHASIS: f64 = 150f64;
+pub const HOP: usize = 256;
+pub const BIN: usize = 1024;
+pub const PREEMPHASIS: f64 = 100f64;
 
 mod sound;
 use sound::max_index;

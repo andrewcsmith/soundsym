@@ -4,6 +4,7 @@ extern crate voting_experts;
 extern crate vox_box;
 extern crate hound;
 extern crate getopts;
+extern crate sample;
 
 use std::path::Path;
 use std::env;
@@ -11,11 +12,12 @@ use std::cmp::Ordering;
 
 use soundsym::*;
 use getopts::Options;
+use sample::{Sample};
 
 use rusty_machine::prelude::*;
 
 
-/// Arranges the phonemes in a sound file in order of increasing loudness.
+/// Arranges the phonemes in a sound file in order of increasing pitch confidence.
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = Options::new();
@@ -46,13 +48,31 @@ fn main() {
     let bits_down: u32 = 32 - spec.bits_per_sample as u32;
     let mut samples = input.samples::<i32>()
         .map(|s| s.unwrap() as f64 / i32::max_value().wrapping_shr(bits_down) as f64);
+        
+    let dir = Path::new("./test_sound");
 
     let mut sounds: Vec<Sound> = splits.iter().map(|split| {
         let sound_samples: Vec<f64> = samples.by_ref().take(*split).collect();
         Sound::from_samples(sound_samples, sample_rate as f64, None, None)
     }).collect();
 
-    sounds.sort_by(|a, b| a.max_power().partial_cmp(&b.max_power()).unwrap_or(Ordering::Less));
+    for sound in sounds.iter_mut() {
+        {
+            let mut output = hound::WavWriter::create(dir.join(Path::new("out_sound.wav")), spec).unwrap();
+            for sample in sound.samples() {
+                output.write_sample(
+                    (sample * i32::max_value().wrapping_shr(bits_down) as f64) as i32
+                ).expect("Could not write sample.");
+            }
+            output.finalize().expect("Could not finalize sound");
+            println!("sound: {}", sound);
+        }
+        sound.preload_pitch_confidence(); 
+    }
+
+    sounds.sort_by(|a, b| 
+        a.pitch_confidence().partial_cmp(&b.pitch_confidence()).unwrap_or(Ordering::Less)
+    );
 
     let mut output = hound::WavWriter::create(&Path::new(&output_path), spec).unwrap();
     for sound in sounds {
@@ -64,4 +84,3 @@ fn main() {
     }
     output.finalize().expect("Could not finalize file");
 }
-

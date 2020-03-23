@@ -134,7 +134,7 @@ impl Sound {
             sample_format: hound::SampleFormat::Int
         };
 
-        let mut file = try!(hound::WavWriter::create(&path, spec));
+        let mut file = hound::WavWriter::create(&path, spec)?;
         for sample in self.samples.iter() {
             try!(file.write_sample((i32::max_value() as f64 * sample) as i32));
         }
@@ -243,7 +243,7 @@ fn analyze_mfccs(sample_rate: f64, samples: &[f64]) -> Vec<f64> {
 
 fn analyze_max_power(samples: &[f64]) -> f64 {
     window::Windower::rectangle(
-        <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), BIN, HOP)
+        <&[[f64; 1]]>::from_sample_slice(&samples[..]).unwrap(), 128, 64)
         .map(|frame| {
             let mut count: usize = 0;
             (frame.take(BIN).fold(0., |acc, s| {
@@ -260,9 +260,12 @@ fn analyze_pitch_confidence(samples: &[f64]) -> f64 {
     // Window the sound and find the maximum pitch confidence anywhere in the sound
     let frame_slice: &[[f64; 1]] = &samples[..].to_frame_slice().unwrap();
     window::Windower::hanning(frame_slice, 2048, 1024).map(|chunk| {
-        let chunk_data: Vec<[f64; 1]> = chunk.collect();
-        chunk_data.to_sample_slice().pitch::<Hanning>(44100., 0.2, maxima, maxima, 100., 500.)
-    }).fold(0f64, |acc, x| (x[0].strength as f64).max(acc))
+        let chunk_data: Vec<[f64; 1]> = chunk.take(2048).collect();
+        let local_maxima = chunk_data[..].to_sample_slice().max_amplitude();
+        chunk_data.to_sample_slice().pitch::<Hanning>(44100., 0.2, local_maxima, maxima, 100., 500.)
+    }).fold(0f64, |acc, x| {
+        (x[0].strength as f64).max(acc)
+    })
 }
 
 fn analyze_mean_mfccs(mfccs: &[f64]) -> [f64; NCOEFFS] {
@@ -533,6 +536,12 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::Arc;
+    use sample::{window, Signal, ToSampleSlice};
+
+    fn sine(len: usize) -> Vec<f64> {
+        let rate = sample::signal::rate(len as f64).const_hz(1.0);
+        rate.clone().sine().take(len).collect::<Vec<[f64; 1]>>().to_sample_slice().to_vec()
+    }    
 
     #[test]
     fn test_audacity_labels_to_timestamps() {
@@ -542,6 +551,13 @@ mod tests {
         assert!((timestamps[26].1 - 5.59353222977394).abs() < 1e-10);
         assert_eq!(timestamps[44].2, Some("ning".to_string()));
         assert_eq!(timestamps.len(), 55);
+    }
+
+    #[test]
+    fn test_analyze_pitch_confidence() {
+        let mut signal = sample::signal::rate(44100.).const_hz(150.0).sine();
+        let vector: Vec<[f64; 1]> = signal.take(2048 * 1 + 1).collect();
+        
     }
 
     #[test]
